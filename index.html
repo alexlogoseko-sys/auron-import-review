@@ -506,42 +506,83 @@
   var ADMIN_NAME = 'Олександр';
 
   /* ===== STORAGE SHIM =====
-     Поза середовищем Claude.ai (наприклад, на GitHub Pages) немає window.storage —
-     цей шим підміняє його на localStorage, щоб реєстрація/логін/каталог працювали
-     на будь-якому статичному хостингу. Дані зберігаються локально в браузері. */
+     Поза середовищем Claude.ai (наприклад, на GitHub Pages) немає window.storage.
+     Цей шим підміняє його так:
+       - shared=true (акаунти користувачів, каталог товарів) -> Firebase Realtime
+         Database через REST API (fetch), щоб дані бачили ВСІ відвідувачі сайту.
+       - shared=false (сесія поточного браузера — хто зараз залогінений тут) ->
+         localStorage, бо це суто локальна прив'язка "хто увійшов на цьому пристрої". */
   if (!window.storage){
     window.storage = (function(){
-      function pKey(key, shared){ return (shared ? 'shared:' : 'priv:') + key; }
+      var FIREBASE_DB_URL = 'https://auron-import-default-rtdb.europe-west1.firebasedatabase.app';
+
+      function fbUrl(key){
+        return FIREBASE_DB_URL + '/shared/' + encodeURIComponent(key) + '.json';
+      }
+      function pKey(key){ return 'priv:' + key; }
+
       return {
         get: async function(key, shared){
           try{
-            var raw = localStorage.getItem(pKey(key, shared));
-            if (raw === null) return null;
-            return { key: key, value: raw, shared: !!shared };
+            if (shared){
+              var res = await fetch(fbUrl(key));
+              if (!res.ok) return null;
+              var data = await res.json();
+              if (data === null || typeof data === 'undefined') return null;
+              return { key: key, value: data, shared: true };
+            } else {
+              var raw = localStorage.getItem(pKey(key));
+              if (raw === null) return null;
+              return { key: key, value: raw, shared: false };
+            }
           }catch(e){ return null; }
         },
         set: async function(key, value, shared){
           try{
-            localStorage.setItem(pKey(key, shared), value);
-            return { key: key, value: value, shared: !!shared };
+            if (shared){
+              var res = await fetch(fbUrl(key), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(value)
+              });
+              if (!res.ok) return null;
+              return { key: key, value: value, shared: true };
+            } else {
+              localStorage.setItem(pKey(key), value);
+              return { key: key, value: value, shared: false };
+            }
           }catch(e){ return null; }
         },
         delete: async function(key, shared){
           try{
-            localStorage.removeItem(pKey(key, shared));
-            return { key: key, deleted: true, shared: !!shared };
+            if (shared){
+              var res = await fetch(fbUrl(key), { method: 'DELETE' });
+              if (!res.ok) return null;
+              return { key: key, deleted: true, shared: true };
+            } else {
+              localStorage.removeItem(pKey(key));
+              return { key: key, deleted: true, shared: false };
+            }
           }catch(e){ return null; }
         },
         list: async function(prefix, shared){
           try{
-            var full = pKey(prefix || '', shared);
-            var offset = (shared ? 7 : 5);
-            var keys = [];
-            for (var i = 0; i < localStorage.length; i++){
-              var k = localStorage.key(i);
-              if (k.indexOf(full) === 0) keys.push(k.slice(offset));
+            if (shared){
+              var res = await fetch(FIREBASE_DB_URL + '/shared.json?shallow=true');
+              if (!res.ok) return null;
+              var data = await res.json();
+              var keys = data ? Object.keys(data) : [];
+              if (prefix) keys = keys.filter(function(k){ return k.indexOf(prefix) === 0; });
+              return { keys: keys, prefix: prefix, shared: true };
+            } else {
+              var full = pKey(prefix || '');
+              var keys2 = [];
+              for (var i = 0; i < localStorage.length; i++){
+                var k = localStorage.key(i);
+                if (k.indexOf(full) === 0) keys2.push(k.slice(5));
+              }
+              return { keys: keys2, prefix: prefix, shared: false };
             }
-            return { keys: keys, prefix: prefix, shared: !!shared };
           }catch(e){ return null; }
         }
       };
