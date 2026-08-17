@@ -205,6 +205,7 @@
   .card-title{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:15.5px;line-height:1.3;margin:0;}
   .card-price{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:var(--accent);}
   .price-shipping-note{font-size:11px;color:#60A5FA;margin-top:-6px;display:flex;align-items:center;gap:4px;}
+  .price-1c-note{font-size:11px;color:var(--text-faint);margin-top:-6px;font-family:'JetBrains Mono',monospace;}
   .card-desc{font-size:12.8px;color:var(--text-dim);line-height:1.55;margin:0;}
   .card-desc.clamped{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
   .desc-toggle{background:none;border:none;color:var(--accent);font-size:11.5px;font-weight:600;cursor:pointer;padding:0;text-align:left;width:fit-content;}
@@ -644,6 +645,27 @@
       <div class="field">
         <label>Посилання на постачальника</label>
         <input type="url" id="f-source" placeholder="1688.com / aliexpress.com / ...">
+      </div>
+    </div>
+
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:500;cursor:pointer">
+        <input type="checkbox" id="f-price-includes-shipping" style="width:auto">
+        Ціна разом з доставкою в Україну
+      </label>
+    </div>
+
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:500;cursor:pointer">
+        <input type="checkbox" id="f-has-1c-price" style="width:auto">
+        Вказати ціну аналога закупки в 1С
+      </label>
+      <div id="f-1c-price-wrap" class="hidden" style="margin-top:8px">
+        <div class="price-group">
+          <span class="price-currency-fixed">₴</span>
+          <input type="number" id="f-1c-price" placeholder="0" min="0" step="0.01">
+        </div>
+        <p class="sub" style="font-size:11.5px;margin-top:4px">Видно лише адміністратору — для внутрішнього порівняння з закупівельною ціною в 1С.</p>
       </div>
     </div>
 
@@ -1554,7 +1576,8 @@
           (item.category ? '<span class="card-category-tag">' + escapeHtml(item.category) + '</span>' : '') +
           '<h3 class="card-title">' + escapeHtml(item.name) + '</h3>' +
           '<div class="card-price mono">$' + escapeHtml(item.price) + '</div>' +
-          (item.status === 'transit' ? '<div class="price-shipping-note">Ціна вказана з урахуванням доставки в Україну</div>' : '') +
+          (item.priceIncludesShipping ? '<div class="price-shipping-note">Ціна вказана з урахуванням доставки в Україну</div>' : '') +
+          (isAdmin && item.price1C != null && item.price1C !== '' ? '<div class="price-1c-note">Аналог у 1С: ₴' + escapeHtml(item.price1C) + '</div>' : '') +
           (item.description ? '<p class="card-desc clamped" data-full="' + escapeHtml(item.description) + '">' + escapeHtml(item.description) + '</p><button class="desc-toggle">Показати повністю</button>' : '') +
           (item.sourceLink ? '<a class="card-link" href="' + escapeHtml(item.sourceLink) + '" target="_blank" rel="noopener">' +
             '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>' +
@@ -2110,6 +2133,13 @@
     document.getElementById('f-category-new').classList.add('hidden');
     document.getElementById('fetch-1688-status').textContent = '';
 
+    document.getElementById('f-price-includes-shipping').checked = !!(editItem && editItem.priceIncludesShipping);
+
+    var has1c = !!(editItem && editItem.price1C != null && editItem.price1C !== '');
+    document.getElementById('f-has-1c-price').checked = has1c;
+    document.getElementById('f-1c-price').value = has1c ? editItem.price1C : '';
+    document.getElementById('f-1c-price-wrap').classList.toggle('hidden', !has1c);
+
     photoDataUrl = (editItem && (editItem.photo||'').indexOf('data:') === 0) ? editItem.photo : null;
     var previewEl = document.getElementById('photo-preview');
     if (editItem && editItem.photo){
@@ -2134,6 +2164,13 @@
       newInput.classList.add('hidden');
       newInput.value = '';
     }
+  });
+
+  document.getElementById('f-has-1c-price').addEventListener('change', function(e){
+    var wrap = document.getElementById('f-1c-price-wrap');
+    wrap.classList.toggle('hidden', !e.target.checked);
+    if (e.target.checked) document.getElementById('f-1c-price').focus();
+    else document.getElementById('f-1c-price').value = '';
   });
 
   /* ===== Categories management modal (admin only) ===== */
@@ -2498,6 +2535,10 @@
     var editId = state.editingId;
     var id = editId || uid();
 
+    var priceIncludesShipping = document.getElementById('f-price-includes-shipping').checked;
+    var has1cPrice = document.getElementById('f-has-1c-price').checked;
+    var price1C = has1cPrice ? document.getElementById('f-1c-price').value : null;
+
     if (editId && state.items[editId]){
       var existingItem = state.items[editId];
       existingItem.name = name;
@@ -2507,6 +2548,8 @@
       existingItem.sourceLink = document.getElementById('f-source').value.trim();
       existingItem.photo = photo;
       existingItem.category = category;
+      existingItem.priceIncludesShipping = priceIncludesShipping;
+      existingItem.price1C = price1C;
     } else {
       var item = {
         id: id,
@@ -2517,6 +2560,8 @@
         sourceLink: document.getElementById('f-source').value.trim(),
         photo: photo,
         category: category,
+        priceIncludesShipping: priceIncludesShipping,
+        price1C: price1C,
         status: 'review',
         addedBy: state.currentUser.username,
         addedAt: Date.now(),
