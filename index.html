@@ -436,6 +436,16 @@
   .answer-toast .at-body{font-size:13.5px;color:var(--text-dim);}
   .answer-toast button{align-self:flex-end;}
 
+  .changelog-toast{border-color:var(--accent);position:relative;padding-right:34px;}
+  .changelog-toast .at-title{color:var(--accent);}
+  .changelog-toast .changelog-close{
+    position:absolute;top:10px;right:10px;background:none;border:none;color:var(--text-faint);
+    cursor:pointer;padding:4px;display:flex;align-self:auto;
+  }
+  .changelog-toast .changelog-close:hover{color:var(--text);}
+  .changelog-list{margin:2px 0 0;padding-left:18px;}
+  .changelog-list li{margin-bottom:3px;}
+
   /* ===== Weekly visit calendar ===== */
   .week-calendar{display:flex;gap:8px;margin:16px 0;}
   .week-day{
@@ -1105,6 +1115,62 @@
   }
 
   /* ===== ACHIEVEMENTS ===== */
+  /* ===== CHANGELOG / UPDATE NOTIFICATIONS =====
+     Add a new entry here each time the site is updated. Shown as a
+     dismissible toast (bottom-right) to every user who hasn't seen it yet —
+     tracked per-account via lastSeenChangelogVersion, so it survives across
+     devices/browsers. Keep entries short — a version line + a few bullets. */
+  var CHANGELOG = [
+    {
+      version: '1.1',
+      changes: [
+        'Додана кнопка «Врахувати доставку в ціну» прямо на картці товару.',
+        'Ціна закупки в Україні (аналог 1С) тепер видна всім користувачам.',
+        'Товари в статусі «В дорозі» автоматично отримують позначку доставки.'
+      ]
+    }
+  ];
+
+  function latestChangelogVersion(){
+    return CHANGELOG.length ? CHANGELOG[CHANGELOG.length - 1].version : null;
+  }
+
+  async function checkChangelog(){
+    if (!state.currentUser || !CHANGELOG.length) return;
+    var latest = latestChangelogVersion();
+    if (state.currentUser.lastSeenChangelogVersion === latest) return;
+
+    var seenVersions = {};
+    // If the user has never seen any changelog before, don't dump the entire
+    // history on them — just show the latest entry going forward.
+    var startIndex = state.currentUser.lastSeenChangelogVersion == null
+      ? CHANGELOG.length - 1
+      : CHANGELOG.findIndex(function(c){ return c.version === state.currentUser.lastSeenChangelogVersion; }) + 1;
+    if (startIndex < 0) startIndex = CHANGELOG.length - 1;
+
+    for (var i = startIndex; i < CHANGELOG.length; i++){
+      showChangelogToast(CHANGELOG[i]);
+    }
+  }
+
+  function showChangelogToast(entry){
+    var node = document.createElement('div');
+    node.className = 'answer-toast changelog-toast';
+    node.innerHTML =
+      '<button class="changelog-close" title="Закрити">' +
+        '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M18 6 6 18M6 6l12 12"/></svg>' +
+      '</button>' +
+      '<div class="at-title">' + escapeHtml(entry.version) + ' оновлення</div>' +
+      '<div class="at-body">Зміни:<ul class="changelog-list">' +
+        entry.changes.map(function(c){ return '<li>' + escapeHtml(c) + '</li>'; }).join('') +
+      '</ul></div>';
+    node.querySelector('.changelog-close').addEventListener('click', async function(){
+      node.remove();
+      await updateCurrentUser(function(record){ record.lastSeenChangelogVersion = entry.version; });
+    });
+    queueToast('answer', node);
+  }
+
   var ACHIEVEMENTS = {
     first_login: { title: 'Перший вхід', text: 'Ви вперше увійшли на сайт', emoji: '🎉' },
     first_rating: { title: 'Перша оцінка', text: 'Ви оцінили перший товар', emoji: '⭐' },
@@ -1280,6 +1346,7 @@
     await recordVisit();
     await checkAnsweredQuestions();
     await checkNewQuestionsForAdmin();
+    await checkChangelog();
     startPolling();
   }
 
@@ -2004,7 +2071,9 @@
     }
     if (e.target.closest('[data-action="toggle-transit"]')){
       if (!isAdmin) return;
-      item.status = (item.status === 'transit') ? 'review' : 'transit';
+      var enteringTransit = item.status !== 'transit';
+      item.status = enteringTransit ? 'transit' : 'review';
+      if (enteringTransit) item.priceIncludesShipping = true;
       render();
       await persist();
       return;
