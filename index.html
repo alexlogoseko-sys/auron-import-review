@@ -204,6 +204,7 @@
   .card-body{padding:32px 16px 48px;display:flex;flex-direction:column;gap:10px;flex:1;}
   .card-title{font-family:'Space Grotesk',sans-serif;font-weight:600;font-size:15.5px;line-height:1.3;margin:0;}
   .card-price{font-family:'JetBrains Mono',monospace;font-size:15px;font-weight:600;color:var(--accent);}
+  .price-shipping-note{font-size:11px;color:#60A5FA;margin-top:-6px;display:flex;align-items:center;gap:4px;}
   .card-desc{font-size:12.8px;color:var(--text-dim);line-height:1.55;margin:0;}
   .card-desc.clamped{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
   .desc-toggle{background:none;border:none;color:var(--accent);font-size:11.5px;font-weight:600;cursor:pointer;padding:0;text-align:left;width:fit-content;}
@@ -763,21 +764,60 @@
        - shared=true (акаунти користувачів, каталог товарів) -> Firebase Realtime
          Database через REST API (fetch), щоб дані бачили ВСІ відвідувачі сайту.
        - shared=false (сесія поточного браузера — хто зараз залогінений тут) ->
-         localStorage, бо це суто локальна прив'язка "хто увійшов на цьому пристрої". */
+         localStorage, бо це суто локальна прив'язка "хто увійшов на цьому пристрої".
+
+     БЕЗПЕКА: усі запити до Firebase проходять анонімну автентифікацію (Firebase
+     Auth), а серверні правила бази вимагають auth != null для читання/запису.
+     Це закриває базу від випадкового/автоматизованого доступу ззовні (хтось,
+     хто просто знайде URL бази, не зможе читати чи писати напряму) — сайт
+     сам непомітно "залогінюється" анонімно перед першим запитом. */
   if (!window.storage){
     window.storage = (function(){
       var FIREBASE_DB_URL = 'https://auron-import-default-rtdb.europe-west1.firebasedatabase.app';
+      var FIREBASE_API_KEY = 'AIzaSyCpBxbMQHuqRydFfiuiBOP1AvG0HClE1E4';
+      var idToken = null;
+      var authPromise = null;
 
-      function fbUrl(key){
-        return FIREBASE_DB_URL + '/shared/' + encodeURIComponent(key) + '.json';
+      function signInAnonymously(){
+        return fetch('https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=' + FIREBASE_API_KEY, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ returnSecureToken: true })
+        }).then(function(r){ return r.ok ? r.json() : null; })
+          .then(function(data){ idToken = (data && data.idToken) || null; return idToken; })
+          .catch(function(){ return null; });
       }
+
+      function ensureAuth(){
+        if (idToken) return Promise.resolve(idToken);
+        if (!authPromise){
+          authPromise = signInAnonymously().then(function(t){ authPromise = null; return t; });
+        }
+        return authPromise;
+      }
+
+      function fbUrl(key, token){
+        return FIREBASE_DB_URL + '/shared/' + encodeURIComponent(key) + '.json' + (token ? '?auth=' + token : '');
+      }
+
+      async function authedFetch(key, opts){
+        var token = await ensureAuth();
+        var res = await fetch(fbUrl(key, token), opts);
+        if (res.status === 401){
+          idToken = null;
+          var freshToken = await ensureAuth();
+          res = await fetch(fbUrl(key, freshToken), opts);
+        }
+        return res;
+      }
+
       function pKey(key){ return 'priv:' + key; }
 
       return {
         get: async function(key, shared){
           try{
             if (shared){
-              var res = await fetch(fbUrl(key));
+              var res = await authedFetch(key);
               if (!res.ok) return null;
               var data = await res.json();
               if (data === null || typeof data === 'undefined') return null;
@@ -792,7 +832,7 @@
         set: async function(key, value, shared){
           try{
             if (shared){
-              var res = await fetch(fbUrl(key), {
+              var res = await authedFetch(key, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(value)
@@ -808,7 +848,7 @@
         delete: async function(key, shared){
           try{
             if (shared){
-              var res = await fetch(fbUrl(key), { method: 'DELETE' });
+              var res = await authedFetch(key, { method: 'DELETE' });
               if (!res.ok) return null;
               return { key: key, deleted: true, shared: true };
             } else {
@@ -820,7 +860,8 @@
         list: async function(prefix, shared){
           try{
             if (shared){
-              var res = await fetch(FIREBASE_DB_URL + '/shared.json?shallow=true');
+              var token = await ensureAuth();
+              var res = await fetch(FIREBASE_DB_URL + '/shared.json?shallow=true' + (token ? '&auth=' + token : ''));
               if (!res.ok) return null;
               var data = await res.json();
               var keys = data ? Object.keys(data) : [];
@@ -871,12 +912,50 @@
   }
 
   function simpleHash(str){
+    // Legacy weak hash — kept ONLY so existing accounts created before the
+    // security upgrade can still log in once (their password is then
+    // silently re-hashed with hashPassword() below). Never used for new
+    // passwords.
     var hash = 5381;
     for (var i = 0; i < str.length; i++){
       hash = ((hash << 5) + hash) + str.charCodeAt(i);
       hash = hash & hash;
     }
     return 'h' + Math.abs(hash).toString(36) + str.length;
+  }
+
+  function randomHex(byteLen){
+    var arr = new Uint8Array(byteLen);
+    (window.crypto || {}).getRandomValues ? window.crypto.getRandomValues(arr) :
+      arr.forEach(function(_, i){ arr[i] = Math.floor(Math.random()*256); });
+    return Array.from(arr).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
+  }
+
+  async function sha256Hex(str){
+    var enc = new TextEncoder().encode(str);
+    var buf = await window.crypto.subtle.digest('SHA-256', enc);
+    return Array.from(new Uint8Array(buf)).map(function(b){ return b.toString(16).padStart(2,'0'); }).join('');
+  }
+
+  /* Salted SHA-256 password hashing, format: s2$<salt>$<digest>.
+     Falls back to the old weak hash only if Web Crypto is unavailable
+     (very old browsers / non-HTTPS context) — acceptable degrade, not the norm. */
+  async function hashPassword(password, salt){
+    if (!(window.crypto && window.crypto.subtle)) return simpleHash(password);
+    salt = salt || randomHex(16);
+    var digest = await sha256Hex(salt + ':' + password);
+    return 's2$' + salt + '$' + digest;
+  }
+
+  async function verifyPassword(password, stored){
+    if (!stored) return false;
+    if (stored.indexOf('s2$') === 0){
+      var parts = stored.split('$');
+      var expected = await hashPassword(password, parts[1]);
+      return expected === stored;
+    }
+    // legacy account — compare with the old weak hash
+    return stored === simpleHash(password);
   }
 
   async function safeGet(key, shared){
@@ -929,7 +1008,7 @@
     }
     var record = {
       username: name,
-      passwordHash: simpleHash(password),
+      passwordHash: await hashPassword(password),
       isAdmin: name === ADMIN_NAME,
       createdAt: Date.now(),
       termsAccepted: false,
@@ -948,8 +1027,15 @@
     name = normName(name);
     var users = await getUsers();
     var record = users[nameKey(name)];
-    if (!record || record.passwordHash !== simpleHash(password)){
+    if (!record || !(await verifyPassword(password, record.passwordHash))){
       return {ok:false, error:'Невірне імʼя або пароль.'};
+    }
+    // Transparently upgrade legacy (pre-security-update) accounts to the
+    // stronger salted-hash format on their next successful login.
+    if (record.passwordHash.indexOf('s2$') !== 0){
+      record.passwordHash = await hashPassword(password);
+      users[nameKey(name)] = record;
+      await saveUsers(users);
     }
     return {ok:true, user: record};
   }
@@ -1468,6 +1554,7 @@
           (item.category ? '<span class="card-category-tag">' + escapeHtml(item.category) + '</span>' : '') +
           '<h3 class="card-title">' + escapeHtml(item.name) + '</h3>' +
           '<div class="card-price mono">$' + escapeHtml(item.price) + '</div>' +
+          (item.status === 'transit' ? '<div class="price-shipping-note">Ціна вказана з урахуванням доставки в Україну</div>' : '') +
           (item.description ? '<p class="card-desc clamped" data-full="' + escapeHtml(item.description) + '">' + escapeHtml(item.description) + '</p><button class="desc-toggle">Показати повністю</button>' : '') +
           (item.sourceLink ? '<a class="card-link" href="' + escapeHtml(item.sourceLink) + '" target="_blank" rel="noopener">' +
             '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>' +
@@ -1747,6 +1834,16 @@
       '</div>' +
 
       '<div class="admin-section">' +
+        '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Резервна копія даних</h3>' +
+        '<p class="sub" style="margin-bottom:12px">Завантажте повний знімок усіх даних сайту (товари, категорії, користувачі, питання, примітки) у файл .json. Цей файл можна зберегти на комп\u2019ютері або перенести на інший хостинг/базу.</p>' +
+        '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+          '<button class="btn btn-primary" id="export-backup-btn">Завантажити резервну копію (.json)</button>' +
+          '<button class="btn btn-ghost upload-btn" type="button">Відновити з файлу<input type="file" id="import-backup-file" accept="application/json"></button>' +
+        '</div>' +
+        '<div id="backup-status" class="sub" style="margin-top:8px;font-size:12px"></div>' +
+      '</div>' +
+
+      '<div class="admin-section">' +
         '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Користувачі</h3>' +
         '<div style="overflow-x:auto">' + usersTableHtml + '</div>' +
       '</div>' +
@@ -1760,6 +1857,72 @@
         '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Відповіді (' + answered.length + ')</h3>' +
         (answered.length ? answered.map(questionCardHtml).join('') : '<p class="sub">Ще немає відповіданих запитань.</p>') +
       '</div>';
+
+    var exportBtn = document.getElementById('export-backup-btn');
+    if (exportBtn) exportBtn.addEventListener('click', exportBackup);
+    var importInput = document.getElementById('import-backup-file');
+    if (importInput) importInput.addEventListener('change', importBackup);
+  }
+
+  /* ===== BACKUP / RESTORE (admin only) =====
+     Downloads/reads every shared key so the whole dataset can be moved to a
+     different backend or hosting provider if needed. */
+  async function exportBackup(){
+    var statusEl = document.getElementById('backup-status');
+    statusEl.textContent = 'Готуємо файл…';
+    try{
+      var dump = {
+        exportedAt: new Date().toISOString(),
+        source: 'Auron import review',
+        users: await getUsers(),
+        catalog: JSON.parse((await safeGet('catalog', true)) || '{"ids":[],"items":{}}'),
+        categories: state.categories,
+        questions: state.questions,
+        notes: state.notes
+      };
+      var blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'auron-backup-' + new Date().toISOString().slice(0,10) + '.json';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      statusEl.textContent = 'Резервну копію завантажено.';
+      statusEl.style.color = 'var(--green)';
+    }catch(e){
+      statusEl.textContent = 'Не вдалося створити резервну копію.';
+      statusEl.style.color = 'var(--red)';
+    }
+  }
+
+  async function importBackup(e){
+    var file = e.target.files[0];
+    if (!file) return;
+    var statusEl = document.getElementById('backup-status');
+    if (!confirm('Відновлення повністю ЗАМІНИТЬ поточні дані сайту (товари, користувачі, питання, примітки) вмістом обраного файлу. Продовжити?')){
+      e.target.value = '';
+      return;
+    }
+    try{
+      var text = await file.text();
+      var dump = JSON.parse(text);
+      statusEl.textContent = 'Відновлюємо дані…';
+      if (dump.users) await window.storage.set('users', JSON.stringify(dump.users), true);
+      if (dump.catalog) await window.storage.set('catalog', JSON.stringify(dump.catalog), true);
+      if (dump.categories) await window.storage.set('categories', JSON.stringify(dump.categories), true);
+      if (dump.questions) await window.storage.set('questions', JSON.stringify(dump.questions), true);
+      if (dump.notes) await window.storage.set('notes', JSON.stringify(dump.notes), true);
+      await loadCatalog();
+      statusEl.textContent = 'Дані відновлено з файлу.';
+      statusEl.style.color = 'var(--green)';
+      renderAdmin();
+    }catch(err){
+      statusEl.textContent = 'Файл пошкоджений або має неправильний формат.';
+      statusEl.style.color = 'var(--red)';
+    }
+    e.target.value = '';
   }
 
   document.getElementById('other-view-container').addEventListener('click', async function(e){
