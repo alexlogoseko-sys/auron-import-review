@@ -164,10 +164,20 @@
   }
   .chip.active{background:var(--accent-dim);border-color:var(--accent);color:var(--accent);}
   .chip:hover:not(.active){border-color:#39404F;color:var(--text);}
-  .toolbar select{margin-left:auto;}
+  .toolbar select, .toolbar > .combo{margin-left:auto;}
+  #category-filter-combo{width:180px;flex:0 0 auto;}
 
   /* ===== Grid ===== */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(272px,1fr));gap:20px;}
+  .grid-groups{display:flex;flex-direction:column;gap:30px;}
+  .category-group-heading{
+    font-family:'Space Grotesk',sans-serif;font-size:16px;font-weight:700;margin:0 0 14px;
+    padding-bottom:9px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:9px;
+  }
+  .category-group-heading .cg-count{
+    font-family:'JetBrains Mono',monospace;font-size:11.5px;color:var(--text-faint);font-weight:500;
+    background:var(--surface-hi);border-radius:100px;padding:2px 9px;
+  }
 
   .card{
     background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
@@ -343,6 +353,42 @@
     display:none;align-items:flex-start;justify-content:center;z-index:100;padding:40px 18px;overflow-y:auto;
   }
   .modal-overlay.open{display:flex;}
+
+  .lightbox-overlay{
+    background:rgba(6,7,10,0.92);align-items:center;padding:24px;cursor:zoom-out;z-index:600;
+  }
+  .lightbox-overlay img{
+    max-width:100%;max-height:100%;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,0.6);
+    cursor:default;
+  }
+  .lightbox-close{
+    position:fixed;top:20px;right:20px;width:40px;height:40px;border-radius:50%;
+    background:rgba(255,255,255,0.08);border:1px solid var(--border);color:var(--text);
+    display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:601;
+  }
+  .lightbox-close:hover{background:rgba(255,255,255,0.16);}
+
+  .card-photo.clickable{cursor:zoom-in;}
+
+  /* ===== Searchable category combobox ===== */
+  .combo{position:relative;}
+  .combo input[type="text"]{width:100%;padding-right:30px;}
+  .combo-clear{
+    position:absolute;top:50%;right:8px;transform:translateY(-50%);background:none;border:none;
+    color:var(--text-faint);cursor:pointer;padding:4px;display:flex;
+  }
+  .combo-clear:hover{color:var(--text);}
+  .combo-panel{
+    position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:50;
+    background:var(--surface-hi);border:1px solid var(--border);border-radius:10px;
+    max-height:220px;overflow-y:auto;box-shadow:0 12px 28px rgba(0,0,0,0.4);padding:4px;
+  }
+  .combo-option{
+    padding:8px 10px;border-radius:7px;font-size:13px;cursor:pointer;color:var(--text);
+  }
+  .combo-option:hover, .combo-option.highlighted{background:var(--surface);}
+  .combo-option.combo-create{color:var(--accent);font-weight:600;}
+  .combo-empty{padding:10px;font-size:12.5px;color:var(--text-faint);}
   .modal{
     background:var(--surface);border:1px solid var(--border);border-radius:16px;
     width:100%;max-width:560px;padding:26px 26px 22px;
@@ -380,7 +426,7 @@
     .stat-pill{display:none;}
     .hero h1{font-size:22px;}
     .grid{grid-template-columns:1fr;}
-    .toolbar select{margin-left:0;}
+    .toolbar select, .toolbar > .combo{margin-left:0;width:100%;}
   }
   /* ===== Edit button (fixed, next to delete) ===== */
   .card-edit-btn{
@@ -612,9 +658,11 @@
       <button class="chip" data-filter="interesting">Цікаво</button>
       <button class="chip" data-filter="top">Топ за рейтингом</button>
     </div>
-    <select id="category-filter">
-      <option value="all">Усі категорії</option>
-    </select>
+    <div class="combo" id="category-filter-combo">
+      <input type="text" id="category-filter-input" placeholder="Усі категорії" autocomplete="off">
+      <button type="button" class="combo-clear hidden" id="category-filter-clear" title="Скинути фільтр">✕</button>
+      <div class="combo-panel hidden" id="category-filter-panel"></div>
+    </div>
     <select id="sort-select">
       <option value="new">Спочатку нові</option>
       <option value="rating">За рейтингом</option>
@@ -686,11 +734,10 @@
 
     <div class="field">
       <label>Категорія</label>
-      <select id="f-category">
-        <option value="">Без категорії</option>
-        <option value="__new__">+ Нова категорія…</option>
-      </select>
-      <input type="text" id="f-category-new" placeholder="Назва нової категорії" style="margin-top:8px" class="hidden">
+      <div class="combo" id="f-category-combo">
+        <input type="text" id="f-category-input" placeholder="Почніть вводити, оберіть зі списку або створіть нову…" autocomplete="off">
+        <div class="combo-panel hidden" id="f-category-panel"></div>
+      </div>
     </div>
 
     <div class="field">
@@ -787,6 +834,13 @@
 
     <div id="questions-thread" style="margin-top:22px"></div>
   </div>
+</div>
+
+<div class="modal-overlay lightbox-overlay" id="lightbox-overlay">
+  <button class="lightbox-close" id="lightbox-close" title="Закрити">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+  </button>
+  <img id="lightbox-img" src="" alt="">
 </div>
 
 <div id="toast-stack" style="position:fixed;bottom:20px;right:20px;z-index:500;display:flex;flex-direction:column-reverse;gap:10px;"></div>
@@ -1510,21 +1564,30 @@
     });
   }
 
+  function getCategoriesInCurrentView(){
+    var relevantIds = state.ids.filter(function(id){
+      var it = state.items[id];
+      if (!it) return false;
+      var inTransit = it.status === 'transit';
+      return state.view === 'transit' ? inTransit : !inTransit;
+    });
+    return state.categories.filter(function(c){
+      return relevantIds.some(function(id){ return (state.items[id].category || '') === c; });
+    });
+  }
+
   function renderCategoryOptions(){
-    var filterSel = document.getElementById('category-filter');
-    var formSel = document.getElementById('f-category');
-    var prevFilter = filterSel.value || 'all';
-
-    var filterHtml = '<option value="all">Усі категорії</option>' +
-      state.categories.map(function(c){ return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>'; }).join('');
-    filterSel.innerHTML = filterHtml;
-    filterSel.value = state.categories.indexOf(prevFilter) > -1 ? prevFilter : 'all';
-    state.categoryFilter = filterSel.value;
-
-    var formHtml = '<option value="">Без категорії</option>' +
-      state.categories.map(function(c){ return '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>'; }).join('') +
-      '<option value="__new__">+ Нова категорія…</option>';
-    formSel.innerHTML = formHtml;
+    // Only offer categories that actually have products in the CURRENT view
+    // (Каталог vs В дорозі) — a category that only exists among "в дорозі"
+    // items shouldn't show up as a filter option while browsing the catalog,
+    // and vice versa. If the currently selected filter no longer applies
+    // here, fall back to "Усі категорії".
+    var inView = getCategoriesInCurrentView();
+    if (state.categoryFilter !== 'all' && inView.indexOf(state.categoryFilter) === -1){
+      state.categoryFilter = 'all';
+      document.getElementById('category-filter-input').value = '';
+      document.getElementById('category-filter-clear').classList.add('hidden');
+    }
 
     renderCategoriesModalList();
   }
@@ -1639,7 +1702,7 @@
         (isAdmin ? '<button class="card-delete-btn" data-action="delete" title="Видалити товар">' +
           '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>' +
         '</button>' : '') +
-        '<div class="card-photo">' + photoBlock + '</div>' +
+        '<div class="card-photo' + (item.photo ? ' clickable' : '') + '" data-action="view-photo">' + photoBlock + '</div>' +
         stampSvg(avg) +
         '<button class="card-note-btn" data-action="open-notes" title="Примітка / запитання">' +
           '?' + (badgeCount ? '<span class="note-badge">' + badgeCount + '</span>' : '') +
@@ -1776,12 +1839,14 @@
       return;
     }
 
+    renderCategoryOptions();
     renderCatalogGrid();
   }
 
   function renderCatalogGrid(){
     var isAdmin = state.currentUser && state.currentUser.isAdmin;
     if (!state.ids.length){
+      grid.className = 'grid';
       grid.innerHTML = '<div class="empty">' +
         '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="var(--text-faint)" stroke-width="1.6"><path d="M21 8V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9"/><path d="m9 12 2 2 4-4"/><path d="M15 21h6m-3-3v6"/></svg>' +
         '<h3 class="h-display">Поки що порожньо</h3>' +
@@ -1794,13 +1859,47 @@
     }
     var ids = getFilteredSortedIds();
     if (!ids.length){
+      grid.className = 'grid';
       var emptyMsg = state.view === 'transit'
         ? 'Жоден товар зараз не позначений як «в дорозі».'
         : 'Спробуйте змінити пошук або фільтр.';
       grid.innerHTML = '<div class="empty"><h3 class="h-display">Нічого не знайдено</h3><p>' + emptyMsg + '</p></div>';
       return;
     }
-    grid.innerHTML = ids.map(function(id){ return cardTemplate(id, state.items[id]); }).join('');
+
+    // A specific category is already selected — no need for group headings,
+    // just show a flat grid of that one category's items.
+    if (state.categoryFilter && state.categoryFilter !== 'all'){
+      grid.className = 'grid';
+      grid.innerHTML = ids.map(function(id){ return cardTemplate(id, state.items[id]); }).join('');
+      return;
+    }
+
+    // Group by category so similar products sit together: "Без категорії"
+    // first, then every other category alphabetically (uk locale).
+    var groups = {};
+    var order = [];
+    ids.forEach(function(id){
+      var cat = state.items[id].category || '';
+      if (!groups[cat]){ groups[cat] = []; order.push(cat); }
+      groups[cat].push(id);
+    });
+    order.sort(function(a, b){
+      if (a === '' && b === '') return 0;
+      if (a === '') return -1;
+      if (b === '') return 1;
+      return a.localeCompare(b, 'uk');
+    });
+
+    grid.className = 'grid-groups';
+    grid.innerHTML = order.map(function(cat){
+      var catIds = groups[cat];
+      var heading = cat ? escapeHtml(cat) : 'Без категорії';
+      return '<div class="category-group">' +
+        '<h3 class="category-group-heading">' + heading + ' <span class="cg-count">' + catIds.length + '</span></h3>' +
+        '<div class="grid">' + catIds.map(function(id){ return cardTemplate(id, state.items[id]); }).join('') + '</div>' +
+      '</div>';
+    }).join('');
   }
 
   /* ===== LEADERBOARD ===== */
@@ -2050,6 +2149,10 @@
     var isAdmin = state.currentUser.isAdmin;
     var myKey = nameKey(state.currentUser.username);
 
+    if (e.target.closest('[data-action="view-photo"]')){
+      if (item.photo) openLightbox(item.photo, item.name);
+      return;
+    }
     if (e.target.closest('[data-action="delete"]')){
       if (!isAdmin) return;
       if (confirm('Видалити «' + item.name + '» з каталогу? Цю дію не можна скасувати.')){
@@ -2172,8 +2275,69 @@
     render();
   });
 
-  document.getElementById('category-filter').addEventListener('change', function(e){
-    state.categoryFilter = e.target.value;
+  /* ===== Generic searchable combobox (category filter + category picker) ===== */
+  function setupCombobox(input, panel, getOptions, onSelect, opts){
+    opts = opts || {};
+
+    function renderPanel(){
+      var q = input.value.trim().toLowerCase();
+      var options = getOptions();
+      var filtered = q ? options.filter(function(o){ return o.label.toLowerCase().indexOf(q) > -1; }) : options;
+      var html = filtered.map(function(o){
+        return '<div class="combo-option" data-value="' + escapeHtml(o.value) + '">' + escapeHtml(o.label) + '</div>';
+      }).join('');
+      if (opts.allowCreate && q && !options.some(function(o){ return o.label.toLowerCase() === q; })){
+        html += '<div class="combo-option combo-create" data-value="__create__">+ Створити «' + escapeHtml(input.value.trim()) + '»</div>';
+      }
+      if (!html) html = '<div class="combo-empty">Нічого не знайдено</div>';
+      panel.innerHTML = html;
+      panel.classList.remove('hidden');
+    }
+
+    input.addEventListener('focus', renderPanel);
+    input.addEventListener('input', renderPanel);
+    input.addEventListener('blur', function(){
+      // small delay so a click on an option registers before the panel hides
+      setTimeout(function(){ panel.classList.add('hidden'); }, 150);
+    });
+    input.addEventListener('keydown', function(e){
+      if (e.key === 'Escape'){ panel.classList.add('hidden'); input.blur(); }
+    });
+    panel.addEventListener('mousedown', function(e){
+      var opt = e.target.closest('.combo-option');
+      if (!opt) return;
+      e.preventDefault();
+      var value = opt.dataset.value;
+      if (value === '__create__'){
+        var typed = input.value.trim();
+        onSelect(typed, typed);
+      } else {
+        onSelect(value, opt.textContent);
+      }
+      panel.classList.add('hidden');
+    });
+  }
+
+  setupCombobox(
+    document.getElementById('category-filter-input'),
+    document.getElementById('category-filter-panel'),
+    function(){
+      var opts = [{ value: 'all', label: 'Усі категорії' }];
+      getCategoriesInCurrentView().forEach(function(c){ opts.push({ value: c, label: c }); });
+      return opts;
+    },
+    function(value, label){
+      state.categoryFilter = value;
+      document.getElementById('category-filter-input').value = (value === 'all') ? '' : label;
+      document.getElementById('category-filter-clear').classList.toggle('hidden', value === 'all');
+      render();
+    }
+  );
+
+  document.getElementById('category-filter-clear').addEventListener('click', function(){
+    state.categoryFilter = 'all';
+    document.getElementById('category-filter-input').value = '';
+    document.getElementById('category-filter-clear').classList.add('hidden');
     render();
   });
 
@@ -2190,6 +2354,27 @@
   });
 
   /* ===== Modal (admin only) ===== */
+  /* ===== PHOTO LIGHTBOX ===== */
+  var lightboxOverlay = document.getElementById('lightbox-overlay');
+  var lightboxImg = document.getElementById('lightbox-img');
+
+  function openLightbox(src, alt){
+    lightboxImg.src = src;
+    lightboxImg.alt = alt || '';
+    lightboxOverlay.classList.add('open');
+  }
+  function closeLightbox(){
+    lightboxOverlay.classList.remove('open');
+    lightboxImg.src = '';
+  }
+  document.getElementById('lightbox-close').addEventListener('click', closeLightbox);
+  lightboxOverlay.addEventListener('click', function(e){
+    if (e.target === lightboxOverlay) closeLightbox();
+  });
+  document.addEventListener('keydown', function(e){
+    if (e.key === 'Escape' && lightboxOverlay.classList.contains('open')) closeLightbox();
+  });
+
   var overlay = document.getElementById('modal-overlay');
   var modalError = document.getElementById('modal-error');
 
@@ -2213,9 +2398,7 @@
     document.getElementById('f-source').value = editItem ? (editItem.sourceLink || '') : '';
     document.getElementById('f-photo-url').value = (editItem && !((editItem.photo||'').indexOf('data:') === 0)) ? (editItem.photo || '') : '';
     document.getElementById('f-photo-file').value = '';
-    document.getElementById('f-category').value = editItem ? (editItem.category || '') : '';
-    document.getElementById('f-category-new').value = '';
-    document.getElementById('f-category-new').classList.add('hidden');
+    document.getElementById('f-category-input').value = editItem ? (editItem.category || '') : '';
     document.getElementById('fetch-1688-status').textContent = '';
 
     document.getElementById('f-price-includes-shipping').checked = !!(editItem && editItem.priceIncludesShipping);
@@ -2240,16 +2423,17 @@
   document.getElementById('cancel-add').addEventListener('click', closeModal);
   overlay.addEventListener('click', function(e){ if (e.target === overlay) closeModal(); });
 
-  document.getElementById('f-category').addEventListener('change', function(e){
-    var newInput = document.getElementById('f-category-new');
-    if (e.target.value === '__new__'){
-      newInput.classList.remove('hidden');
-      newInput.focus();
-    } else {
-      newInput.classList.add('hidden');
-      newInput.value = '';
-    }
-  });
+  setupCombobox(
+    document.getElementById('f-category-input'),
+    document.getElementById('f-category-panel'),
+    function(){
+      return state.categories.map(function(c){ return { value: c, label: c }; });
+    },
+    function(value, label){
+      document.getElementById('f-category-input').value = label;
+    },
+    { allowCreate: true }
+  );
 
   document.getElementById('f-has-1c-price').addEventListener('change', function(e){
     var wrap = document.getElementById('f-1c-price-wrap');
@@ -2599,22 +2783,17 @@
     }
     var photo = photoDataUrl || document.getElementById('f-photo-url').value.trim() || '';
 
-    var categorySel = document.getElementById('f-category').value;
+    var categoryRaw = document.getElementById('f-category-input').value.trim();
     var category = '';
     var newCategoryAdded = false;
-    if (categorySel === '__new__'){
-      var newCatName = document.getElementById('f-category-new').value.trim();
-      if (newCatName){
-        category = newCatName;
-        if (addCategory(newCatName)) newCategoryAdded = true;
-        else {
-          // category with this name already existed (case-insensitive) — use the stored casing
-          var existing = state.categories.filter(function(c){ return c.toLowerCase() === newCatName.toLowerCase(); })[0];
-          category = existing || newCatName;
-        }
+    if (categoryRaw){
+      var existingCat = state.categories.filter(function(c){ return c.toLowerCase() === categoryRaw.toLowerCase(); })[0];
+      if (existingCat){
+        category = existingCat;
+      } else {
+        category = categoryRaw;
+        if (addCategory(categoryRaw)) newCategoryAdded = true;
       }
-    } else {
-      category = categorySel;
     }
 
     var editId = state.editingId;
