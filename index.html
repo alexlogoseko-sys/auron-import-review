@@ -195,6 +195,7 @@
   .badge-new{background:rgba(234,124,57,0.16);color:var(--accent);border:1px solid rgba(234,124,57,0.4);}
   .badge-picked{background:rgba(52,211,153,0.16);color:var(--green);border:1px solid rgba(52,211,153,0.4);}
   .badge-transit{background:rgba(96,165,250,0.16);color:#60A5FA;border:1px solid rgba(96,165,250,0.4);}
+  .badge-own-needs{background:rgba(234,124,57,0.16);color:var(--accent);border:1px solid rgba(234,124,57,0.4);}
 
   .card-photo{
     width:100%;aspect-ratio:4/3;background:var(--bg-alt);
@@ -562,7 +563,11 @@
     <form class="auth-form" id="login-form">
       <div class="field">
         <label>Імʼя</label>
-        <input type="text" id="login-name" placeholder="Ваше імʼя" autocomplete="username">
+        <input type="text" id="login-name" placeholder="Ваше імʼя" autocomplete="given-name">
+      </div>
+      <div class="field">
+        <label>Прізвище</label>
+        <input type="text" id="login-lastname" placeholder="Ваше прізвище" autocomplete="family-name">
       </div>
       <div class="field">
         <label>Пароль</label>
@@ -575,7 +580,11 @@
     <form class="auth-form hidden" id="register-form">
       <div class="field">
         <label>Імʼя</label>
-        <input type="text" id="reg-name" placeholder="Як до вас звертатись" autocomplete="username">
+        <input type="text" id="reg-name" placeholder="Як до вас звертатись" autocomplete="given-name">
+      </div>
+      <div class="field">
+        <label>Прізвище</label>
+        <input type="text" id="reg-lastname" placeholder="Ваше прізвище" autocomplete="family-name">
       </div>
       <div class="field">
         <label>Пароль</label>
@@ -606,7 +615,7 @@
     </div>
     <div class="stat-pill"><b id="stat-total">0</b><span>Товарів</span></div>
     <div class="stat-pill"><b id="stat-pending">0</b><span>Без оцінки</span></div>
-    <div class="stat-pill"><b id="stat-picked">0</b><span>До замовлення</span></div>
+    <div class="stat-pill"><b id="stat-picked">0</b><span>Оцінено товарів</span></div>
     <div class="user-box">
       <div class="user-chip">
         <div class="user-avatar" id="user-avatar">?</div>
@@ -634,12 +643,13 @@
   <div class="hero">
     <div>
       <h1 class="h-display">Каталог на розгляд</h1>
-      <p>Кожен товар з Китаю проходить контроль команди: галочки «замовити» / «цікаво» та оцінка 0–10 від кожного керівника.</p>
+      <p>Кожен товар з Китаю проходить контроль команди: галочки «замовити» / «цікаво» та оцінка 0–10 від кожного керівника та менеджера.</p>
     </div>
   </div>
 
   <div class="view-tabs" id="view-tabs">
-    <button class="view-tab active" data-view="catalog">Каталог</button>
+    <button class="view-tab active" data-view="novelty">Новинки</button>
+    <button class="view-tab" data-view="analogs">Аналоги</button>
     <button class="view-tab" data-view="transit">В дорозі <span class="count" id="transit-count">0</span></button>
     <button class="view-tab" data-view="leaderboard">Рейтинг</button>
     <button class="view-tab" data-view="profile">Мій прогрес</button>
@@ -728,8 +738,24 @@
           <span class="price-currency-fixed">$</span>
           <input type="number" id="f-1c-price" placeholder="0" min="0" step="0.01">
         </div>
-        <p class="sub" style="font-size:11.5px;margin-top:4px">Ціна закупки в Україні (аналог у 1С) — буде видно всім користувачам, редагувати може лише адміністратор.</p>
+        <p class="sub" style="font-size:11.5px;margin-top:4px">Ціна закупки в Україні (аналог у 1С) — видно адміну та керівникам, менеджери не бачать.</p>
       </div>
+    </div>
+
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:500;cursor:pointer">
+        <input type="checkbox" id="f-own-needs" style="width:auto">
+        Власні потреби
+      </label>
+      <p class="sub" style="font-size:11.5px;margin-top:2px">Товар буде прихований від менеджерів — бачать лише адмін і керівники.</p>
+    </div>
+
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;font-weight:500;cursor:pointer">
+        <input type="checkbox" id="f-is-analog" style="width:auto">
+        Аналог
+      </label>
+      <p class="sub" style="font-size:11.5px;margin-top:2px">Товар є у нас на складі та є дешевшим аналогом товару з Китаю — потрапить у папку «Аналоги» замість «Новинки».</p>
     </div>
 
     <div class="field">
@@ -833,6 +859,42 @@
     </div>
 
     <div id="questions-thread" style="margin-top:22px"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="edit-user-modal-overlay">
+  <div class="modal">
+    <h2 class="h-display">Редагувати користувача</h2>
+    <p class="sub" id="edit-user-sub"></p>
+
+    <div class="field">
+      <label>Імʼя (логін)</label>
+      <input type="text" id="eu-name">
+    </div>
+    <div class="field">
+      <label>Прізвище</label>
+      <input type="text" id="eu-lastname">
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label>Новий пароль <span style="color:var(--text-faint);font-weight:400">(залиште порожнім, щоб не змінювати)</span></label>
+        <input type="password" id="eu-password" placeholder="Новий пароль" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label>Повторіть новий пароль</label>
+        <input type="password" id="eu-password2" placeholder="Ще раз новий пароль" autocomplete="new-password">
+      </div>
+    </div>
+
+    <p class="sub" style="font-size:11.5px">Пароль зберігається в базі у зашифрованому вигляді — переглянути поточний пароль неможливо навіть адміну. Щоб нагадати користувачу пароль, встановіть новий і повідомте його особисто.</p>
+
+    <div id="edit-user-error" class="err-banner" style="display:none;margin-top:10px"><span></span></div>
+
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="cancel-edit-user">Скасувати</button>
+      <button class="btn btn-primary" id="save-edit-user">Зберегти</button>
+    </div>
   </div>
 </div>
 
@@ -983,7 +1045,7 @@
     currentUser: null,
     categories: [],
     categoryFilter: 'all',
-    view: 'catalog',
+    view: 'novelty',
     questions: [],
     notes: {},
     editingId: null
@@ -1090,17 +1152,42 @@
   function normName(n){ return n.trim(); }
   function nameKey(n){ return normName(n).toLowerCase(); }
 
-  async function registerUser(name, password){
+  /* Assigns a permanent internalId (1, 2, 3…) in registration order to any
+     user missing one — runs once as a transparent backfill for accounts
+     created before this feature existed. Never shown to the user themselves,
+     admin-only bookkeeping. */
+  function ensureAllInternalIds(users){
+    var keys = Object.keys(users);
+    var missing = keys.filter(function(k){ return users[k].internalId == null; });
+    if (!missing.length) return false;
+    var sorted = keys.slice().sort(function(a, b){ return (users[a].createdAt || 0) - (users[b].createdAt || 0); });
+    sorted.forEach(function(k, i){ users[k].internalId = i + 1; });
+    return true;
+  }
+
+  function nextInternalId(users){
+    var max = 0;
+    Object.keys(users).forEach(function(k){
+      if (users[k].internalId > max) max = users[k].internalId;
+    });
+    return max + 1;
+  }
+
+  async function registerUser(name, lastName, password){
     name = normName(name);
     var users = await getUsers();
     var key = nameKey(name);
     if (users[key]){
       return {ok:false, error:'Користувач з таким імʼям уже існує.'};
     }
+    ensureAllInternalIds(users);
     var record = {
       username: name,
+      lastName: normName(lastName || ''),
+      internalId: nextInternalId(users),
       passwordHash: await hashPassword(password),
       isAdmin: name === ADMIN_NAME,
+      role: name === ADMIN_NAME ? 'admin' : 'manager',
       createdAt: Date.now(),
       termsAccepted: false,
       visits: [],
@@ -1114,17 +1201,59 @@
     return {ok:true, user: record};
   }
 
-  async function loginUser(name, password){
+  /* Existing accounts created before roles existed don't have a `role`
+     field yet — migrate them the first time we touch their record. Admin
+     status always tracks ADMIN_NAME, never a stored flag someone could tamper with. */
+  function ensureRole(record){
+    var correctRole = record.username === ADMIN_NAME ? 'admin' : (record.role || 'manager');
+    if (record.username === ADMIN_NAME) correctRole = 'admin';
+    if (record.role !== correctRole){
+      record.role = correctRole;
+      return true;
+    }
+    return false;
+  }
+
+  /* Cost/pricing visibility: admin and "Керівник" (lead) see purchase price,
+     shipping-included note, 1С reference price, and the supplier link.
+     "Менеджер" (default role for everyone new) does not. */
+  function canSeeCost(user){
+    return !!(user && (user.role === 'admin' || user.role === 'lead'));
+  }
+
+  function itemVisibleToUser(item, user){
+    // "Власні потреби" items are hidden from managers entirely.
+    if (item.ownNeeds && !(user && (user.role === 'admin' || user.role === 'lead'))) return false;
+    return true;
+  }
+
+  async function loginUser(name, lastName, password){
     name = normName(name);
+    lastName = normName(lastName || '');
     var users = await getUsers();
     var record = users[nameKey(name)];
     if (!record || !(await verifyPassword(password, record.passwordHash))){
-      return {ok:false, error:'Невірне імʼя або пароль.'};
+      return {ok:false, error:'Невірне імʼя, прізвище або пароль.'};
+    }
+    var needsSave = false;
+    if (record.lastName){
+      if (record.lastName.toLowerCase() !== lastName.toLowerCase()){
+        return {ok:false, error:'Невірне імʼя, прізвище або пароль.'};
+      }
+    } else if (lastName){
+      // legacy account created before the last-name field existed — record it now
+      record.lastName = lastName;
+      needsSave = true;
     }
     // Transparently upgrade legacy (pre-security-update) accounts to the
     // stronger salted-hash format on their next successful login.
     if (record.passwordHash.indexOf('s2$') !== 0){
       record.passwordHash = await hashPassword(password);
+      needsSave = true;
+    }
+    if (ensureRole(record)) needsSave = true;
+    if (ensureAllInternalIds(users)) needsSave = true;
+    if (needsSave){
       users[nameKey(name)] = record;
       await saveUsers(users);
     }
@@ -1137,6 +1266,12 @@
     var users = await getUsers();
     var record = users[nameKey(savedName)];
     if (!record) return null;
+    var needsSave = ensureRole(record);
+    if (ensureAllInternalIds(users)) needsSave = true;
+    if (needsSave){
+      users[nameKey(savedName)] = record;
+      await saveUsers(users);
+    }
     return record;
   }
 
@@ -1437,11 +1572,12 @@
     var errEl = document.getElementById('login-error');
     errEl.textContent = '';
     var name = document.getElementById('login-name').value.trim();
+    var lastName = document.getElementById('login-lastname').value.trim();
     var pass = document.getElementById('login-password').value;
-    if (!name || !pass){ errEl.textContent = 'Заповніть імʼя та пароль.'; return; }
+    if (!name || !lastName || !pass){ errEl.textContent = 'Заповніть імʼя, прізвище та пароль.'; return; }
     var submitBtn = e.target.querySelector('button[type=submit]');
     submitBtn.disabled = true;
-    var res = await loginUser(name, pass);
+    var res = await loginUser(name, lastName, pass);
     submitBtn.disabled = false;
     if (!res.ok){ errEl.textContent = res.error; return; }
     state.currentUser = res.user;
@@ -1454,14 +1590,15 @@
     var errEl = document.getElementById('register-error');
     errEl.textContent = '';
     var name = document.getElementById('reg-name').value.trim();
+    var lastName = document.getElementById('reg-lastname').value.trim();
     var pass = document.getElementById('reg-password').value;
     var pass2 = document.getElementById('reg-password2').value;
-    if (!name || !pass){ errEl.textContent = 'Заповніть імʼя та пароль.'; return; }
+    if (!name || !lastName || !pass){ errEl.textContent = 'Заповніть імʼя, прізвище та пароль.'; return; }
     if (pass.length < 4){ errEl.textContent = 'Пароль має містити щонайменше 4 символи.'; return; }
     if (pass !== pass2){ errEl.textContent = 'Паролі не співпадають.'; return; }
     var submitBtn = e.target.querySelector('button[type=submit]');
     submitBtn.disabled = true;
-    var res = await registerUser(name, pass);
+    var res = await registerUser(name, lastName, pass);
     submitBtn.disabled = false;
     if (!res.ok){ errEl.textContent = res.error; return; }
     state.currentUser = res.user;
@@ -1476,6 +1613,7 @@
     await clearSession();
     state.currentUser = null;
     document.getElementById('login-name').value = '';
+    document.getElementById('login-lastname').value = '';
     document.getElementById('login-password').value = '';
     showAuthScreen();
   });
@@ -1577,8 +1715,8 @@
     var relevantIds = state.ids.filter(function(id){
       var it = state.items[id];
       if (!it) return false;
-      var inTransit = it.status === 'transit';
-      return state.view === 'transit' ? inTransit : !inTransit;
+      if (!itemVisibleToUser(it, state.currentUser)) return false;
+      return itemFolder(it) === state.view;
     });
     return state.categories.filter(function(c){
       return relevantIds.some(function(id){ return (state.items[id].category || '') === c; });
@@ -1654,6 +1792,7 @@
     var avg = avgRating(item);
     var votesCount = Object.keys(item.votes || {}).length;
     if (item.status === 'transit') out.push('<span class="badge badge-transit">В дорозі</span>');
+    if (item.ownNeeds && canSeeCost(state.currentUser)) out.push('<span class="badge badge-own-needs">Власні потреби</span>');
     if (avg != null && avg >= 8 && votesCount >= 1) out.push('<span class="badge badge-hit">Хіт</span>');
     if (daysSince(item.addedAt) <= 3) out.push('<span class="badge badge-new">Нове</span>');
     if (orderCount(item) >= 1) out.push('<span class="badge badge-picked">Обрано</span>');
@@ -1687,6 +1826,7 @@
     var votes = item.votes || {};
     var voteNames = Object.keys(votes);
     var isAdmin = state.currentUser && state.currentUser.isAdmin;
+    var showCost = canSeeCost(state.currentUser);
     var photoBlock = item.photo
       ? '<img src="' + escapeHtml(item.photo) + '" alt="' + escapeHtml(item.name) + '" loading="lazy">'
       : '<svg class="ph-icon" width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-5-5L5 21"/></svg>';
@@ -1719,19 +1859,19 @@
         '<div class="card-body">' +
           (item.category ? '<span class="card-category-tag">' + escapeHtml(item.category) + '</span>' : '') +
           '<h3 class="card-title">' + escapeHtml(item.name) + '</h3>' +
-          '<div class="card-price mono">$' + escapeHtml(item.price) + '</div>' +
-          (item.priceIncludesShipping ? '<div class="price-shipping-note">Ціна вказана з урахуванням доставки в Україну</div>' : '') +
-          (item.price1C != null && item.price1C !== '' ? '<div class="price-1c-note"><span class="p1c-label">Закупка в Україні:</span> $' + escapeHtml(item.price1C) + '</div>' : '') +
+          (showCost ? '<div class="card-price mono">$' + escapeHtml(item.price) + '</div>' : '') +
+          (showCost && item.priceIncludesShipping ? '<div class="price-shipping-note">Ціна вказана з урахуванням доставки в Україну</div>' : '') +
+          (showCost && item.price1C != null && item.price1C !== '' ? '<div class="price-1c-note"><span class="p1c-label">Закупка в Україні:</span> $' + escapeHtml(item.price1C) + '</div>' : '') +
           (item.description ? '<p class="card-desc clamped" data-full="' + escapeHtml(item.description) + '">' + escapeHtml(item.description) + '</p><button class="desc-toggle">Показати повністю</button>' : '') +
-          (item.sourceLink ? '<a class="card-link" href="' + escapeHtml(item.sourceLink) + '" target="_blank" rel="noopener">' +
+          (showCost && item.sourceLink ? '<a class="card-link" href="' + escapeHtml(item.sourceLink) + '" target="_blank" rel="noopener">' +
             '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>' +
             'Постачальник</a>' : '') +
           '<div class="meta-line">Додав(ла) ' + escapeHtml(item.addedBy || '—') + ' · ' + new Date(item.addedAt).toLocaleDateString('uk-UA') + '</div>' +
           '<div class="divider"></div>' +
           '<div class="vote-row">' +
-            '<button class="toggle-chip ' + (mv.order ? 'order-on' : '') + '" data-action="order">' +
+            (state.view !== 'transit' ? '<button class="toggle-chip ' + (mv.order ? 'order-on' : '') + '" data-action="order">' +
               '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M20 6 9 17l-5-5"/></svg>' +
-              'Замовити</button>' +
+              'Замовити</button>' : '') +
             '<button class="toggle-chip ' + (mv.interesting ? 'interesting-on' : '') + '" data-action="interesting">' +
               '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m12 2 3.1 6.6 7.2.8-5.4 4.9 1.5 7.1L12 17.8 5.6 21.4l1.5-7.1L1.7 9.4l7.2-.8Z"/></svg>' +
               'Цікаво</button>' +
@@ -1762,13 +1902,19 @@
       '</div>';
   }
 
+  /* Which of the 3 folders an item belongs to. "В дорозі" takes priority —
+     an item marked "в дорозі" stays there even if also flagged as analog. */
+  function itemFolder(item){
+    if (item.status === 'transit') return 'transit';
+    return item.isAnalog ? 'analogs' : 'novelty';
+  }
+
   function getFilteredSortedIds(){
     var list = state.ids.slice();
-    if (state.view === 'transit'){
-      list = list.filter(function(id){ return state.items[id] && state.items[id].status === 'transit'; });
-    } else {
-      list = list.filter(function(id){ return !state.items[id] || state.items[id].status !== 'transit'; });
-    }
+    list = list.filter(function(id){
+      var it = state.items[id];
+      return it && itemFolder(it) === state.view && itemVisibleToUser(it, state.currentUser);
+    });
     if (state.categoryFilter && state.categoryFilter !== 'all'){
       list = list.filter(function(id){ return (state.items[id].category || '') === state.categoryFilter; });
     }
@@ -1809,16 +1955,23 @@
   }
 
   function updateStats(){
-    var catalogIds = state.ids.filter(function(id){ return !state.items[id] || state.items[id].status !== 'transit'; });
-    var total = catalogIds.length;
+    var visibleIds = state.ids.filter(function(id){
+      var it = state.items[id];
+      return it && itemVisibleToUser(it, state.currentUser);
+    });
+    var total = visibleIds.length;
     var myKey = state.currentUser ? nameKey(state.currentUser.username) : null;
-    var pending = myKey ? catalogIds.filter(function(id){
-      var it = state.items[id]; return !(it.votes && it.votes[myKey]);
-    }).length : total;
-    var picked = catalogIds.filter(function(id){ return orderCount(state.items[id]) > 0; }).length;
+    // "Оцінено" means the user actually set a 0–10 rating — just checking
+    // "Замовити"/"Цікаво" (which creates a vote record with rating:0) must
+    // NOT count as rated, otherwise the counters drift out of sync with reality.
+    var ratedCount = myKey ? visibleIds.filter(function(id){
+      var mv = state.items[id].votes && state.items[id].votes[myKey];
+      return mv && mv.rating > 0;
+    }).length : 0;
+    var pending = total - ratedCount;
     document.getElementById('stat-total').textContent = total;
     document.getElementById('stat-pending').textContent = pending;
-    document.getElementById('stat-picked').textContent = picked;
+    document.getElementById('stat-picked').textContent = ratedCount + ' з ' + total;
 
     var transitCount = state.ids.filter(function(id){ return state.items[id] && state.items[id].status === 'transit'; }).length;
     var tc = document.getElementById('transit-count');
@@ -1836,7 +1989,7 @@
     if (!state.loaded) return;
     updateStats();
 
-    var isCatalogView = (state.view === 'catalog' || state.view === 'transit');
+    var isCatalogView = (state.view === 'novelty' || state.view === 'analogs' || state.view === 'transit');
     document.getElementById('catalog-toolbar').classList.toggle('hidden', !isCatalogView);
     grid.classList.toggle('hidden', !isCatalogView);
     document.getElementById('other-view-container').classList.toggle('hidden', isCatalogView);
@@ -1869,9 +2022,10 @@
     var ids = getFilteredSortedIds();
     if (!ids.length){
       grid.className = 'grid';
-      var emptyMsg = state.view === 'transit'
-        ? 'Жоден товар зараз не позначений як «в дорозі».'
-        : 'Спробуйте змінити пошук або фільтр.';
+      var emptyMsg;
+      if (state.view === 'transit') emptyMsg = 'Жоден товар зараз не позначений як «в дорозі».';
+      else if (state.view === 'analogs') emptyMsg = 'Жоден товар ще не позначений як «Аналог».';
+      else emptyMsg = 'Спробуйте змінити пошук або фільтр.';
       grid.innerHTML = '<div class="empty"><h3 class="h-display">Нічого не знайдено</h3><p>' + emptyMsg + '</p></div>';
       return;
     }
@@ -1916,19 +2070,60 @@
     var container = document.getElementById('other-view-container');
     container.innerHTML = '<div class="loading-state"><div class="spin"></div>Завантаження…</div>';
     var users = await getUsers();
-    var rows = Object.keys(users).map(function(k){ return users[k]; })
+    var allUsers = Object.keys(users).map(function(k){ return users[k]; });
+
+    var timeRows = allUsers
       .filter(function(u){ return (u.totalTimeMs || 0) >= 5*60*1000; })
       .sort(function(a,b){ return (b.totalTimeMs||0) - (a.totalTimeMs||0); });
 
-    if (!rows.length){
-      container.innerHTML = '<div class="empty"><h3 class="h-display">Поки що порожньо</h3><p>Рейтинг зʼявиться, коли хтось проведе на сайті щонайменше 5 хвилин.</p></div>';
-      return;
+    // Per-user counts derived from the actual catalog votes, not from the
+    // user record — this always reflects the live data.
+    var ratedCounts = {};
+    var flagCounts = {};
+    state.ids.forEach(function(id){
+      var it = state.items[id];
+      if (!it || !it.votes) return;
+      Object.keys(it.votes).forEach(function(key){
+        var mv = it.votes[key];
+        if (!mv) return;
+        var displayName = mv.displayName || key;
+        if (mv.rating > 0){
+          ratedCounts[key] = ratedCounts[key] || { username: displayName, count: 0 };
+          ratedCounts[key].count++;
+        }
+        var flagAdd = (mv.interesting ? 1 : 0) + (mv.order ? 1 : 0);
+        if (flagAdd > 0){
+          flagCounts[key] = flagCounts[key] || { username: displayName, count: 0 };
+          flagCounts[key].count += flagAdd;
+        }
+      });
+    });
+    var ratedRows = Object.keys(ratedCounts).map(function(k){ return ratedCounts[k]; })
+      .sort(function(a,b){ return b.count - a.count; });
+    var flagRows = Object.keys(flagCounts).map(function(k){ return flagCounts[k]; })
+      .sort(function(a,b){ return b.count - a.count; });
+
+    function listHtml(rows, valueFn, emptyText){
+      if (!rows.length) return '<p class="sub" style="font-size:12.5px">' + emptyText + '</p>';
+      return '<div class="leaderboard-list">' + rows.map(function(r, i){
+        return '<div class="lb-row"><span class="lb-rank">#' + (i+1) + '</span>' +
+          '<span class="lb-name">' + escapeHtml(r.username) + '</span>' +
+          '<span class="lb-time">' + valueFn(r) + '</span></div>';
+      }).join('') + '</div>';
     }
-    container.innerHTML = '<div class="leaderboard-list">' + rows.map(function(u, i){
-      return '<div class="lb-row"><span class="lb-rank">#' + (i+1) + '</span>' +
-        '<span class="lb-name">' + escapeHtml(u.username) + '</span>' +
-        '<span class="lb-time">' + formatDuration(u.totalTimeMs) + '</span></div>';
-    }).join('') + '</div>';
+
+    container.innerHTML =
+      '<h2 class="h-display" style="margin-bottom:6px">Рейтинг</h2>' +
+      '<p class="sub" style="margin-bottom:20px">Рейтинг за кількістю часу, проведеного на сайті — враховуються лише ті, хто провів щонайменше 5 хвилин.</p>' +
+      listHtml(timeRows, function(u){ return formatDuration(u.totalTimeMs); }, 'Рейтинг зʼявиться, коли хтось проведе на сайті щонайменше 5 хвилин.') +
+
+      '<h3 class="h-display" style="font-size:16px;margin:28px 0 6px">Оцінено товарів</h3>' +
+      '<p class="sub" style="font-size:12.5px;margin-bottom:14px">Скільки товарів кожен користувач оцінив (0–10).</p>' +
+      listHtml(ratedRows, function(r){ return r.count; }, 'Поки що ніхто не оцінив жодного товару.') +
+
+      '<h3 class="h-display" style="font-size:16px;margin:28px 0 6px">Активність</h3>' +
+      '<p class="sub" style="font-size:12.5px;margin-bottom:14px">Скільки позначок «Цікаво» та «Замовити» поставив кожен користувач (разом).</p>' +
+      listHtml(flagRows, function(r){ return r.count; }, 'Поки що ніхто не поставив жодної позначки.');
   }
 
   /* ===== PROFILE (visit calendar + achievements + time) ===== */
@@ -1997,19 +2192,29 @@
     var onlineCount = userList.filter(function(u){ return u.lastSeenAt && (now - u.lastSeenAt) < ONLINE_WINDOW_MS; }).length;
 
     var usersTableHtml = '<table class="admin-table"><thead><tr>' +
-      '<th>Користувач</th><th>Дата реєстрації</th><th>Відвідувань</th><th>Останній візит</th>' +
-      '<th>Загальний час</th><th>Ачівки</th><th>Статус</th>' +
+      '<th>ID</th><th>Імʼя</th><th>Прізвище</th><th>Роль</th><th>Дата реєстрації</th><th>Відвідувань</th><th>Останній візит</th>' +
+      '<th>Загальний час</th><th>Ачівки</th><th>Статус</th><th></th>' +
       '</tr></thead><tbody>' +
-      userList.sort(function(a,b){ return (b.createdAt||0) - (a.createdAt||0); }).map(function(u){
+      userList.sort(function(a,b){ return (a.internalId||0) - (b.internalId||0); }).map(function(u){
         var isOnline = u.lastSeenAt && (now - u.lastSeenAt) < ONLINE_WINDOW_MS;
+        var roleCell = u.role === 'admin'
+          ? '<span style="color:var(--accent);font-weight:600;font-size:12.5px">Адмін</span>'
+          : '<select class="role-select" data-username="' + escapeHtml(u.username) + '" style="width:auto;padding:4px 8px;font-size:12.5px">' +
+              '<option value="manager"' + (u.role === 'manager' ? ' selected' : '') + '>Менеджер</option>' +
+              '<option value="lead"' + (u.role === 'lead' ? ' selected' : '') + '>Керівник</option>' +
+            '</select>';
         return '<tr>' +
-          '<td>' + escapeHtml(u.username) + (u.isAdmin ? ' <span style="color:var(--accent);font-size:11px">(адмін)</span>' : '') + '</td>' +
+          '<td class="mono" style="color:var(--text-faint)">' + (u.internalId != null ? u.internalId : '—') + '</td>' +
+          '<td>' + escapeHtml(u.username) + '</td>' +
+          '<td>' + (u.lastName ? escapeHtml(u.lastName) : '<span style="color:var(--text-faint)">—</span>') + '</td>' +
+          '<td>' + roleCell + '</td>' +
           '<td>' + (u.createdAt ? new Date(u.createdAt).toLocaleDateString('uk-UA') : '—') + '</td>' +
           '<td>' + ((u.visits || []).length) + '</td>' +
           '<td>' + (u.lastVisitAt ? new Date(u.lastVisitAt).toLocaleString('uk-UA') : '—') + '</td>' +
           '<td>' + formatDuration(u.totalTimeMs) + '</td>' +
           '<td>' + ((u.achievements || []).length) + '/' + Object.keys(ACHIEVEMENTS).length + '</td>' +
           '<td>' + (isOnline ? '<span class="online-dot"></span>Онлайн' : '—') + '</td>' +
+          '<td><button class="btn btn-ghost edit-user-btn" data-username="' + escapeHtml(u.username) + '" style="padding:5px 10px;font-size:12px">Редагувати</button></td>' +
         '</tr>';
       }).join('') + '</tbody></table>';
 
@@ -2069,7 +2274,120 @@
     if (exportBtn) exportBtn.addEventListener('click', exportBackup);
     var importInput = document.getElementById('import-backup-file');
     if (importInput) importInput.addEventListener('change', importBackup);
+
+    document.querySelectorAll('.role-select').forEach(function(sel){
+      sel.addEventListener('change', async function(e){
+        var username = e.target.dataset.username;
+        var newRole = e.target.value;
+        var usersNow = await getUsers();
+        var key = nameKey(username);
+        if (usersNow[key]){
+          usersNow[key].role = newRole;
+          await saveUsers(usersNow);
+          if (state.currentUser && nameKey(state.currentUser.username) === key){
+            state.currentUser.role = newRole;
+          }
+        }
+        renderAdmin();
+      });
+    });
+
+    document.querySelectorAll('.edit-user-btn').forEach(function(btn){
+      btn.addEventListener('click', function(){ openEditUserModal(btn.dataset.username); });
+    });
   }
+
+  /* ===== EDIT USER (admin only) ===== */
+  var editUserOverlay = document.getElementById('edit-user-modal-overlay');
+  var editUserError = document.getElementById('edit-user-error');
+
+  function openEditUserModal(username){
+    state.editingUsername = username;
+    editUserError.style.display = 'none';
+    document.getElementById('eu-password').value = '';
+    document.getElementById('eu-password2').value = '';
+
+    getUsers().then(function(users){
+      var record = users[nameKey(username)];
+      if (!record) return;
+      var isAdminRow = record.role === 'admin';
+      document.getElementById('edit-user-sub').textContent = 'ID ' + (record.internalId != null ? record.internalId : '—') + ' · зареєстрований ' +
+        (record.createdAt ? new Date(record.createdAt).toLocaleDateString('uk-UA') : '—');
+      document.getElementById('eu-name').value = record.username;
+      document.getElementById('eu-name').disabled = isAdminRow;
+      document.getElementById('eu-lastname').value = record.lastName || '';
+      editUserOverlay.classList.add('open');
+    });
+  }
+
+  function closeEditUserModal(){ editUserOverlay.classList.remove('open'); state.editingUsername = null; }
+
+  document.getElementById('cancel-edit-user').addEventListener('click', closeEditUserModal);
+  editUserOverlay.addEventListener('click', function(e){ if (e.target === editUserOverlay) closeEditUserModal(); });
+
+  document.getElementById('save-edit-user').addEventListener('click', async function(){
+    var origUsername = state.editingUsername;
+    if (!origUsername) return;
+    editUserError.style.display = 'none';
+
+    var newName = document.getElementById('eu-name').value.trim();
+    var newLastName = document.getElementById('eu-lastname').value.trim();
+    var newPass = document.getElementById('eu-password').value;
+    var newPass2 = document.getElementById('eu-password2').value;
+
+    if (!newName){
+      editUserError.style.display = 'block';
+      editUserError.querySelector('span').textContent = 'Імʼя не може бути порожнім.';
+      return;
+    }
+    if (newPass && newPass.length < 4){
+      editUserError.style.display = 'block';
+      editUserError.querySelector('span').textContent = 'Новий пароль має містити щонайменше 4 символи.';
+      return;
+    }
+    if (newPass !== newPass2){
+      editUserError.style.display = 'block';
+      editUserError.querySelector('span').textContent = 'Паролі не співпадають.';
+      return;
+    }
+
+    var users = await getUsers();
+    var origKey = nameKey(origUsername);
+    var record = users[origKey];
+    if (!record) { closeEditUserModal(); return; }
+
+    var isAdminRow = record.role === 'admin';
+    var newKey = nameKey(newName);
+
+    if (!isAdminRow && newKey !== origKey && users[newKey]){
+      editUserError.style.display = 'block';
+      editUserError.querySelector('span').textContent = 'Користувач з таким імʼям уже існує.';
+      return;
+    }
+
+    record.lastName = newLastName;
+    if (newPass) record.passwordHash = await hashPassword(newPass);
+
+    if (!isAdminRow && newKey !== origKey){
+      record.username = newName;
+      delete users[origKey];
+      users[newKey] = record;
+    } else {
+      users[origKey] = record;
+    }
+
+    var btn = document.getElementById('save-edit-user');
+    btn.disabled = true;
+    await saveUsers(users);
+    btn.disabled = false;
+
+    if (state.currentUser && nameKey(state.currentUser.username) === origKey){
+      state.currentUser = record;
+    }
+
+    closeEditUserModal();
+    renderAdmin();
+  });
 
   /* ===== BACKUP / RESTORE (admin only) =====
      Downloads/reads every shared key so the whole dataset can be moved to a
@@ -2416,6 +2734,9 @@
     document.getElementById('f-has-1c-price').checked = has1c;
     document.getElementById('f-1c-price').value = has1c ? editItem.price1C : '';
     document.getElementById('f-1c-price-wrap').classList.toggle('hidden', !has1c);
+
+    document.getElementById('f-own-needs').checked = !!(editItem && editItem.ownNeeds);
+    document.getElementById('f-is-analog').checked = !!(editItem && editItem.isAnalog);
 
     photoDataUrl = (editItem && (editItem.photo||'').indexOf('data:') === 0) ? editItem.photo : null;
     var previewEl = document.getElementById('photo-preview');
@@ -2811,6 +3132,8 @@
     var priceIncludesShipping = document.getElementById('f-price-includes-shipping').checked;
     var has1cPrice = document.getElementById('f-has-1c-price').checked;
     var price1C = has1cPrice ? document.getElementById('f-1c-price').value : null;
+    var ownNeeds = document.getElementById('f-own-needs').checked;
+    var isAnalog = document.getElementById('f-is-analog').checked;
 
     if (editId && state.items[editId]){
       var existingItem = state.items[editId];
@@ -2823,6 +3146,8 @@
       existingItem.category = category;
       existingItem.priceIncludesShipping = priceIncludesShipping;
       existingItem.price1C = price1C;
+      existingItem.ownNeeds = ownNeeds;
+      existingItem.isAnalog = isAnalog;
     } else {
       var item = {
         id: id,
@@ -2835,6 +3160,8 @@
         category: category,
         priceIncludesShipping: priceIncludesShipping,
         price1C: price1C,
+        ownNeeds: ownNeeds,
+        isAnalog: isAnalog,
         status: 'review',
         addedBy: state.currentUser.username,
         addedAt: Date.now(),
