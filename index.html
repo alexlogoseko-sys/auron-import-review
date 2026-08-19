@@ -2205,6 +2205,11 @@
     var now = Date.now();
     var onlineCount = userList.filter(function(u){ return u.lastSeenAt && (now - u.lastSeenAt) < ONLINE_WINDOW_MS; }).length;
 
+    var legacyPhotoCount = state.ids.filter(function(id){
+      var it = state.items[id];
+      return it && it.photo && it.photo.indexOf('data:') === 0;
+    }).length;
+
     var usersTableHtml = '<table class="admin-table"><thead><tr>' +
       '<th>ID</th><th>Імʼя</th><th>Прізвище</th><th>Роль</th><th>Дата реєстрації</th><th>Відвідувань</th><th>Останній візит</th>' +
       '<th>Загальний час</th><th>Ачівки</th><th>Статус</th><th></th>' +
@@ -2270,6 +2275,15 @@
       '</div>' +
 
       '<div class="admin-section">' +
+        '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Оптимізація трафіку Firebase</h3>' +
+        '<p class="sub" style="margin-bottom:12px">' + legacyPhotoCount + ' з ' + state.ids.length + ' товарів мають фото, вбудоване прямо в базу даних (старий формат) — це роздуває трафік, бо повне фото завантажується/вивантажується щоразу, коли ХТОСЬ ставить оцінку будь-якому товару. Натисніть, щоб перенести їх у Firebase Storage — у базі залишаться лише короткі посилання.</p>' +
+        '<button class="btn btn-primary" id="migrate-photos-btn"' + (legacyPhotoCount ? '' : ' disabled') + '>' +
+          (legacyPhotoCount ? 'Перенести ' + legacyPhotoCount + ' фото у Storage' : 'Усі фото вже оптимізовано ✓') +
+        '</button>' +
+        '<div id="migrate-photos-status" class="sub" style="margin-top:8px;font-size:12px"></div>' +
+      '</div>' +
+
+      '<div class="admin-section">' +
         '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Користувачі</h3>' +
         '<div style="overflow-x:auto">' + usersTableHtml + '</div>' +
       '</div>' +
@@ -2288,6 +2302,8 @@
     if (exportBtn) exportBtn.addEventListener('click', exportBackup);
     var importInput = document.getElementById('import-backup-file');
     if (importInput) importInput.addEventListener('change', importBackup);
+    var migrateBtn = document.getElementById('migrate-photos-btn');
+    if (migrateBtn) migrateBtn.addEventListener('click', migrateLegacyPhotos);
 
     document.querySelectorAll('.role-select').forEach(function(sel){
       sel.addEventListener('change', async function(e){
@@ -2406,6 +2422,41 @@
   /* ===== BACKUP / RESTORE (admin only) =====
      Downloads/reads every shared key so the whole dataset can be moved to a
      different backend or hosting provider if needed. */
+  /* ===== MIGRATE LEGACY BASE64 PHOTOS -> FIREBASE STORAGE (admin only) =====
+     One-time cleanup for products added before photo uploads went through
+     Storage. Converts each embedded base64 photo to a Storage download URL
+     and rewrites the catalog once at the end. */
+  async function migrateLegacyPhotos(){
+    var btn = document.getElementById('migrate-photos-btn');
+    var statusEl = document.getElementById('migrate-photos-status');
+    var targets = state.ids.filter(function(id){
+      var it = state.items[id];
+      return it && it.photo && it.photo.indexOf('data:') === 0;
+    });
+    if (!targets.length) return;
+
+    btn.disabled = true;
+    var done = 0;
+    var failed = 0;
+    for (var i = 0; i < targets.length; i++){
+      var id = targets[i];
+      statusEl.textContent = 'Переносимо фото ' + (i + 1) + ' з ' + targets.length + '…';
+      try{
+        var dataUrl = state.items[id].photo;
+        var blob = await (await fetch(dataUrl)).blob();
+        var downloadUrl = await uploadPhotoToStorage(blob);
+        state.items[id].photo = downloadUrl;
+        done++;
+      }catch(e){
+        failed++;
+      }
+    }
+    await persist();
+    statusEl.textContent = 'Готово: перенесено ' + done + (failed ? ', не вдалося ' + failed : '') + '.';
+    statusEl.style.color = failed ? 'var(--red)' : 'var(--green)';
+    renderAdmin();
+  }
+
   async function exportBackup(){
     var statusEl = document.getElementById('backup-status');
     statusEl.textContent = 'Готуємо файл…';
