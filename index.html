@@ -949,25 +949,77 @@
         return authPromise;
       }
 
-      function fbUrl(key, token){
-        return FIREBASE_DB_URL + '/shared/' + encodeURIComponent(key) + '.json' + (token ? '?auth=' + token : '');
+      function fbUrl(path, token){
+        return FIREBASE_DB_URL + '/shared/' + path + '.json' + (token ? '?auth=' + token : '');
       }
 
-      async function authedFetch(key, opts){
+      async function authedRequest(path, opts){
         var token = await ensureAuth();
-        var res = await fetch(fbUrl(key, token), opts);
+        var res = await fetch(fbUrl(path, token), opts);
         if (res.status === 401){
           idToken = null;
           var freshToken = await ensureAuth();
-          res = await fetch(fbUrl(key, freshToken), opts);
+          res = await fetch(fbUrl(path, freshToken), opts);
         }
         return res;
+      }
+
+      // Backward-compatible flat-key helper — used for small, rarely-contended
+      // values (e.g. the categories list) where a full overwrite is fine.
+      async function authedFetch(key, opts){
+        return authedRequest(encodeURIComponent(key), opts);
       }
 
       function pKey(key){ return 'priv:' + key; }
 
       return {
         getAuthToken: ensureAuth,
+
+        /* ===== Granular path API =====
+           Reads/writes a SPECIFIC sub-path (e.g. 'users/ivan' or
+           'catalog/items/abc123/votes/ivan') instead of a whole flat key.
+           This is what makes concurrent edits from different people safe —
+           two users updating DIFFERENT paths (or even different children of
+           the same path via patchPath) never clobber each other, unlike a
+           full-blob overwrite. */
+        getPath: async function(path){
+          try{
+            var res = await authedRequest(path);
+            if (!res.ok) return null;
+            var data = await res.json();
+            return (data === null || typeof data === 'undefined') ? null : data;
+          }catch(e){ return null; }
+        },
+        setPath: async function(path, value){
+          try{
+            var res = await authedRequest(path, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(value)
+            });
+            return res.ok;
+          }catch(e){ return false; }
+        },
+        // Shallow-merges the given keys into `path`'s children WITHOUT
+        // touching sibling keys — e.g. patchPath('catalog/items/X/votes', {ivan: {...}})
+        // only ever writes the "ivan" child, leaving every other user's vote intact.
+        patchPath: async function(path, patchObj){
+          try{
+            var res = await authedRequest(path, {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(patchObj)
+            });
+            return res.ok;
+          }catch(e){ return false; }
+        },
+        deletePath: async function(path){
+          try{
+            var res = await authedRequest(path, { method: 'DELETE' });
+            return res.ok;
+          }catch(e){ return false; }
+        },
+
         get: async function(key, shared){
           try{
             if (shared){
@@ -1140,14 +1192,51 @@
     }
   }
 
-  /* ===== USERS / AUTH ===== */
+  /* ===== USERS / AUTH =====
+     Each user lives at its own path (shared/users/{key}) instead of one giant
+     shared blob. This is the critical fix for the data-loss bug: previously
+     EVERY action (even a 45-second heartbeat) read the WHOLE users blob,
+     modified it in memory, and wrote the WHOLE thing back — so if two people
+     were online at once, whoever's write finished last would silently erase
+     any user who registered (or any change made) in that overlapping window.
+     Per-user paths mean two different people's writes never touch the same
+     Firebase node, so they can never clobber each other. */
+  var usersMigrationAttempted = false;
+
   async function getUsers(){
-    var raw = await safeGet('users', true);
-    if (!raw) return {};
-    try{ return JSON.parse(raw); }catch(e){ return {}; }
+    var usersObj = await window.storage.getPath('users');
+    var looksMigrated = usersObj && typeof usersObj === 'object' && !Array.isArray(usersObj) &&
+      Object.keys(usersObj).every(function(k){ return usersObj[k] && typeof usersObj[k] === 'object'; });
+    if (looksMigrated) return usersObj;
+
+    // Old single-blob format (a JSON *string* stored under the flat 'users'
+    // key) or nothing yet — recover what's there and migrate it once.
+    if (!usersMigrationAttempted){
+      usersMigrationAttempted = true;
+      var legacyRaw = await safeGet('users', true);
+      if (legacyRaw){
+        try{
+          var legacyUsers = JSON.parse(legacyRaw);
+          if (legacyUsers && typeof legacyUsers === 'object' && Object.keys(legacyUsers).length){
+            await window.storage.setPath('users', legacyUsers);
+            return legacyUsers;
+          }
+        }catch(e){ /* fall through */ }
+      }
+    }
+    return {};
   }
+
+  // Bulk overwrite — ONLY for the explicit "restore from backup" admin
+  // action, where replacing everything at once is the intended behaviour.
+  // Everywhere else, write a single user's own path instead (see
+  // saveOneUser below) so concurrent users never clobber each other.
   async function saveUsers(users){
-    return safeSet('users', JSON.stringify(users), true);
+    return window.storage.setPath('users', users);
+  }
+
+  async function saveOneUser(key, record){
+    return window.storage.setPath('users/' + key, record);
   }
 
   function normName(n){ return n.trim(); }
@@ -1156,14 +1245,27 @@
   /* Assigns a permanent internalId (1, 2, 3…) in registration order to any
      user missing one — runs once as a transparent backfill for accounts
      created before this feature existed. Never shown to the user themselves,
-     admin-only bookkeeping. */
+     admin-only bookkeeping. Returns the list of keys that were changed, so
+     the caller can persist just those individual user paths. */
   function ensureAllInternalIds(users){
     var keys = Object.keys(users);
     var missing = keys.filter(function(k){ return users[k].internalId == null; });
-    if (!missing.length) return false;
+    if (!missing.length) return [];
     var sorted = keys.slice().sort(function(a, b){ return (users[a].createdAt || 0) - (users[b].createdAt || 0); });
-    sorted.forEach(function(k, i){ users[k].internalId = i + 1; });
-    return true;
+    var changed = [];
+    sorted.forEach(function(k, i){
+      if (users[k].internalId !== i + 1){
+        users[k].internalId = i + 1;
+        changed.push(k);
+      }
+    });
+    return changed;
+  }
+
+  async function persistChangedUsers(users, keys){
+    for (var i = 0; i < keys.length; i++){
+      await saveOneUser(keys[i], users[keys[i]]);
+    }
   }
 
   function nextInternalId(users){
@@ -1181,7 +1283,7 @@
     if (users[key]){
       return {ok:false, error:'Користувач з таким імʼям уже існує.'};
     }
-    ensureAllInternalIds(users);
+    var changedLegacyKeys = ensureAllInternalIds(users);
     var record = {
       username: name,
       lastName: normName(lastName || ''),
@@ -1197,8 +1299,9 @@
       achievements: []
     };
     users[key] = record;
-    var saved = await saveUsers(users);
+    var saved = await saveOneUser(key, record);
     if (!saved) return {ok:false, error:'Не вдалося створити акаунт. Спробуйте ще раз.'};
+    if (changedLegacyKeys.length) await persistChangedUsers(users, changedLegacyKeys);
     return {ok:true, user: record};
   }
 
@@ -1232,7 +1335,8 @@
     name = normName(name);
     lastName = normName(lastName || '');
     var users = await getUsers();
-    var record = users[nameKey(name)];
+    var key = nameKey(name);
+    var record = users[key];
     if (!record || !(await verifyPassword(password, record.passwordHash))){
       return {ok:false, error:'Невірне імʼя, прізвище або пароль.'};
     }
@@ -1253,11 +1357,11 @@
       needsSave = true;
     }
     if (ensureRole(record)) needsSave = true;
-    if (ensureAllInternalIds(users)) needsSave = true;
-    if (needsSave){
-      users[nameKey(name)] = record;
-      await saveUsers(users);
-    }
+    var idKeysChanged = ensureAllInternalIds(users);
+    if (idKeysChanged.indexOf(key) > -1) needsSave = true;
+    var changedLegacyKeys = idKeysChanged.filter(function(k){ return k !== key; });
+    if (needsSave) await saveOneUser(key, record);
+    if (changedLegacyKeys.length) await persistChangedUsers(users, changedLegacyKeys);
     return {ok:true, user: record};
   }
 
@@ -1265,14 +1369,15 @@
     var savedName = await safeGet('session-user', false);
     if (!savedName) return null;
     var users = await getUsers();
-    var record = users[nameKey(savedName)];
+    var key = nameKey(savedName);
+    var record = users[key];
     if (!record) return null;
     var needsSave = ensureRole(record);
-    if (ensureAllInternalIds(users)) needsSave = true;
-    if (needsSave){
-      users[nameKey(savedName)] = record;
-      await saveUsers(users);
-    }
+    var idKeysChanged2 = ensureAllInternalIds(users);
+    if (idKeysChanged2.indexOf(key) > -1) needsSave = true;
+    var changedLegacyKeys2 = idKeysChanged2.filter(function(k){ return k !== key; });
+    if (needsSave) await saveOneUser(key, record);
+    if (changedLegacyKeys2.length) await persistChangedUsers(users, changedLegacyKeys2);
     return record;
   }
 
@@ -1292,16 +1397,14 @@
     var current = state.currentUser;
     if (!current) return;
     var key = nameKey(current.username);
-    var users = await getUsers();
-    var record = users[key] || current;
+    var record = (await window.storage.getPath('users/' + key)) || current;
     mutateFn(record);
-    users[key] = record;
     // Re-check after the await: the user may have logged out (or switched
     // accounts) while this request was in flight — don't resurrect a stale session.
     if (state.currentUser && nameKey(state.currentUser.username) === key){
       state.currentUser = record;
     }
-    await saveUsers(users);
+    await saveOneUser(key, record);
   }
 
   /* ===== ACHIEVEMENTS ===== */
@@ -1339,6 +1442,14 @@
         'Виправлено лічильник товарів — «Оцінено товарів» тепер рахує коректно.',
         'Прибрано кнопку «Замовити» у вкладці «В дорозі».',
         'Рейтинг доповнено окремими розділами: оцінені товари та активність.'
+      ]
+    },
+    {
+      version: '1.4',
+      changes: [
+        'Виправлено критичну помилку, через яку користувачі та товари могли зникати при одночасній роботі кількох людей на сайті.',
+        'Дані тепер зберігаються надійніше — кожен користувач і товар мають окремий запис у базі.',
+        'Фото товарів переносяться у Firebase Storage замість бази даних — швидше й дешевше.'
       ]
     }
   ];
@@ -1633,50 +1744,166 @@
   });
 
   /* ===== CATALOG ===== */
+  /* ===== CATALOG =====
+     Same fix as users: items live at their own paths (catalog/items/{id})
+     instead of one shared blob, so two people editing DIFFERENT products (or
+     voting on the same one) never clobber each other. Votes specifically use
+     a PATCH so even two people voting on the SAME product at the same time
+     each only touch their own vote entry. */
+  var catalogMigrationAttempted = false;
+
   async function loadCatalog(){
-    var raw = await safeGet('catalog', true);
-    if (raw){
-      try{
-        var parsed = JSON.parse(raw);
-        state.ids = parsed.ids || [];
-        state.items = parsed.items || {};
-      }catch(e){
-        state.ids = []; state.items = {};
+    var data = await window.storage.getPath('catalog');
+    var looksMigrated = data && typeof data === 'object' && !Array.isArray(data);
+
+    if (!looksMigrated && !catalogMigrationAttempted){
+      catalogMigrationAttempted = true;
+      var legacyRaw = await safeGet('catalog', true);
+      if (legacyRaw){
+        try{
+          var legacy = JSON.parse(legacyRaw);
+          if (legacy && typeof legacy === 'object'){
+            var migrated = { ids: legacy.ids || [], items: legacy.items || {} };
+            await window.storage.setPath('catalog', migrated);
+            data = migrated;
+          }
+        }catch(e){ /* fall through */ }
       }
     }
+
+    if (data && typeof data === 'object'){
+      state.ids = data.ids || [];
+      state.items = data.items || {};
+    } else {
+      state.ids = []; state.items = {};
+    }
+
     await loadCategories();
     await loadThreads();
     state.loaded = true;
     render();
   }
 
+  // Full overwrite of ONE item — safe for admin-only actions (add/edit/
+  // delete/toggle-transit/toggle-shipping-price) since a single admin is the
+  // only actor touching a given product at a time.
+  async function persistItem(id){
+    try{
+      await window.storage.setPath('catalog/items/' + id, state.items[id]);
+    }catch(e){
+      toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
+    }
+  }
+
+  // Just the ordered id list — small and changes only on add/delete.
+  async function persistIds(){
+    try{
+      await window.storage.setPath('catalog/ids', state.ids);
+    }catch(e){
+      toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
+    }
+  }
+
+  async function deleteItemRemote(id){
+    try{
+      await window.storage.deletePath('catalog/items/' + id);
+    }catch(e){
+      toastError('Не вдалося видалити товар. Перевірте зʼєднання і спробуйте ще раз.');
+    }
+  }
+
+  // The hot path: rating a product, marking "Замовити"/"Цікаво". PATCH only
+  // touches this one user's vote key — everyone else's votes on the same
+  // product are left completely untouched, even if they vote at the same instant.
+  async function persistVote(id, myKey){
+    try{
+      var mv = state.items[id].votes[myKey];
+      await window.storage.patchPath('catalog/items/' + id + '/votes', { [myKey]: mv });
+    }catch(e){
+      toastError('Не вдалося зберегти вашу оцінку. Перевірте зʼєднання і спробуйте ще раз.');
+    }
+  }
+
+  async function removeVoteRemote(id, myKey){
+    try{
+      await window.storage.deletePath('catalog/items/' + id + '/votes/' + myKey);
+    }catch(e){
+      toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
+    }
+  }
+
+  // Kept for the rare bulk case (restoring a full backup) — everywhere else
+  // uses the targeted functions above instead.
   async function persist(){
     try{
-      await window.storage.set('catalog', JSON.stringify({ids: state.ids, items: state.items}), true);
+      await window.storage.setPath('catalog', {ids: state.ids, items: state.items});
     }catch(e){
       toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
     }
   }
 
   /* ===== NOTES & QUESTIONS ===== */
+  var threadsMigrationAttempted = false;
+
   async function loadThreads(){
-    var rawQ = await safeGet('questions', true);
-    try{ state.questions = rawQ ? JSON.parse(rawQ) : []; }catch(e){ state.questions = []; }
-    var rawN = await safeGet('notes', true);
-    try{ state.notes = rawN ? JSON.parse(rawN) : {}; }catch(e){ state.notes = {}; }
+    var qData = await window.storage.getPath('questions');
+    var looksMigratedQ = qData && typeof qData === 'object' && !Array.isArray(qData);
+    var nData = await window.storage.getPath('notes');
+    var looksMigratedN = nData && typeof nData === 'object' && !Array.isArray(nData);
+
+    if ((!looksMigratedQ || !looksMigratedN) && !threadsMigrationAttempted){
+      threadsMigrationAttempted = true;
+      if (!looksMigratedQ){
+        var rawQ = await safeGet('questions', true);
+        if (rawQ){
+          try{
+            var legacyQ = JSON.parse(rawQ);
+            if (Array.isArray(legacyQ) && legacyQ.length){
+              var qMap = {};
+              legacyQ.forEach(function(q){ if (q && q.id) qMap[q.id] = q; });
+              await window.storage.setPath('questions', qMap);
+              qData = qMap;
+            }
+          }catch(e){ /* fall through */ }
+        }
+      }
+      if (!looksMigratedN){
+        var rawN = await safeGet('notes', true);
+        if (rawN){
+          try{
+            var legacyN = JSON.parse(rawN);
+            if (legacyN && typeof legacyN === 'object'){
+              await window.storage.setPath('notes', legacyN);
+              nData = legacyN;
+            }
+          }catch(e){ /* fall through */ }
+        }
+      }
+    }
+
+    state.questions = qData ? Object.keys(qData).map(function(k){ return qData[k]; }) : [];
+    state.notes = (nData && typeof nData === 'object') ? nData : {};
   }
 
-  async function persistQuestions(){
+  // Each question/note lives at its own path — one person answering a
+  // question, or writing a personal note, never touches anyone else's.
+  async function persistQuestion(qid){
     try{
-      await window.storage.set('questions', JSON.stringify(state.questions), true);
+      var q = state.questions.filter(function(x){ return x.id === qid; })[0];
+      if (q) await window.storage.setPath('questions/' + qid, q);
     }catch(e){
       toastError('Не вдалося зберегти запитання. Перевірте зʼєднання.');
     }
   }
 
-  async function persistNotes(){
+  async function persistNote(itemId, userKey){
     try{
-      await window.storage.set('notes', JSON.stringify(state.notes), true);
+      var text = state.notes[itemId] && state.notes[itemId][userKey];
+      if (text){
+        await window.storage.setPath('notes/' + itemId + '/' + userKey, text);
+      } else {
+        await window.storage.deletePath('notes/' + itemId + '/' + userKey);
+      }
     }catch(e){
       toastError('Не вдалося зберегти примітку. Перевірте зʼєднання.');
     }
@@ -1718,11 +1945,14 @@
 
   function removeCategory(name){
     state.categories = state.categories.filter(function(c){ return c !== name; });
+    var affected = [];
     state.ids.forEach(function(id){
       if (state.items[id] && state.items[id].category === name){
         state.items[id].category = '';
+        affected.push(id);
       }
     });
+    return affected;
   }
 
   function getCategoriesInCurrentView(){
@@ -2309,11 +2539,11 @@
       sel.addEventListener('change', async function(e){
         var username = e.target.dataset.username;
         var newRole = e.target.value;
-        var usersNow = await getUsers();
         var key = nameKey(username);
-        if (usersNow[key]){
-          usersNow[key].role = newRole;
-          await saveUsers(usersNow);
+        var record = await window.storage.getPath('users/' + key);
+        if (record){
+          record.role = newRole;
+          await saveOneUser(key, record);
           if (state.currentUser && nameKey(state.currentUser.username) === key){
             state.currentUser.role = newRole;
           }
@@ -2398,17 +2628,19 @@
     record.lastName = newLastName;
     if (newPass) record.passwordHash = await hashPassword(newPass);
 
-    if (!isAdminRow && newKey !== origKey){
-      record.username = newName;
-      delete users[origKey];
-      users[newKey] = record;
-    } else {
-      users[origKey] = record;
-    }
-
     var btn = document.getElementById('save-edit-user');
     btn.disabled = true;
-    await saveUsers(users);
+
+    if (!isAdminRow && newKey !== origKey){
+      record.username = newName;
+      // Renaming moves the record to a new path — write the new one first,
+      // then remove the old one, so the account is never briefly missing.
+      await saveOneUser(newKey, record);
+      await window.storage.deletePath('users/' + origKey);
+    } else {
+      await saveOneUser(origKey, record);
+    }
+
     btn.disabled = false;
 
     if (state.currentUser && nameKey(state.currentUser.username) === origKey){
@@ -2438,6 +2670,7 @@
     btn.disabled = true;
     var done = 0;
     var failed = 0;
+    var doneIds = [];
     for (var i = 0; i < targets.length; i++){
       var id = targets[i];
       statusEl.textContent = 'Переносимо фото ' + (i + 1) + ' з ' + targets.length + '…';
@@ -2446,12 +2679,15 @@
         var blob = await (await fetch(dataUrl)).blob();
         var downloadUrl = await uploadPhotoToStorage(blob);
         state.items[id].photo = downloadUrl;
+        doneIds.push(id);
         done++;
       }catch(e){
         failed++;
       }
     }
-    await persist();
+    for (var j = 0; j < doneIds.length; j++){
+      await persistItem(doneIds[j]);
+    }
     statusEl.textContent = 'Готово: перенесено ' + done + (failed ? ', не вдалося ' + failed : '') + '.';
     statusEl.style.color = failed ? 'var(--red)' : 'var(--green)';
     renderAdmin();
@@ -2465,7 +2701,7 @@
         exportedAt: new Date().toISOString(),
         source: 'Auron import review',
         users: await getUsers(),
-        catalog: JSON.parse((await safeGet('catalog', true)) || '{"ids":[],"items":{}}'),
+        catalog: { ids: state.ids, items: state.items },
         categories: state.categories,
         questions: state.questions,
         notes: state.notes
@@ -2499,11 +2735,17 @@
       var text = await file.text();
       var dump = JSON.parse(text);
       statusEl.textContent = 'Відновлюємо дані…';
-      if (dump.users) await window.storage.set('users', JSON.stringify(dump.users), true);
-      if (dump.catalog) await window.storage.set('catalog', JSON.stringify(dump.catalog), true);
-      if (dump.categories) await window.storage.set('categories', JSON.stringify(dump.categories), true);
-      if (dump.questions) await window.storage.set('questions', JSON.stringify(dump.questions), true);
-      if (dump.notes) await window.storage.set('notes', JSON.stringify(dump.notes), true);
+      if (dump.users) await window.storage.setPath('users', dump.users);
+      if (dump.catalog) await window.storage.setPath('catalog', dump.catalog);
+      if (dump.categories){ state.categories = dump.categories; await persistCategories(); }
+      if (dump.questions){
+        var qMap = {};
+        (Array.isArray(dump.questions) ? dump.questions : Object.values(dump.questions)).forEach(function(q){
+          if (q && q.id) qMap[q.id] = q;
+        });
+        await window.storage.setPath('questions', qMap);
+      }
+      if (dump.notes) await window.storage.setPath('notes', dump.notes);
       await loadCatalog();
       statusEl.textContent = 'Дані відновлено з файлу.';
       statusEl.style.color = 'var(--green)';
@@ -2528,7 +2770,7 @@
     q.answeredAt = Date.now();
     q.readByAsker = false;
     btn.disabled = true;
-    await persistQuestions();
+    await persistQuestion(qid);
     renderAdmin();
   });
 
@@ -2551,7 +2793,8 @@
         state.ids = state.ids.filter(function(x){ return x !== id; });
         delete state.items[id];
         render();
-        await persist();
+        await deleteItemRemote(id);
+        await persistIds();
       }
       return;
     }
@@ -2570,14 +2813,14 @@
       item.status = enteringTransit ? 'transit' : 'review';
       if (enteringTransit) item.priceIncludesShipping = true;
       render();
-      await persist();
+      await persistItem(id);
       return;
     }
     if (e.target.closest('[data-action="toggle-shipping-price"]')){
       if (!isAdmin) return;
       item.priceIncludesShipping = !item.priceIncludesShipping;
       render();
-      await persist();
+      await persistItem(id);
       return;
     }
     if (e.target.closest('.desc-toggle')){
@@ -2600,7 +2843,7 @@
       mv.updatedAt = Date.now();
       item.votes[myKey] = mv;
       render();
-      await persist();
+      await persistVote(id, myKey);
       return;
     }
     if (e.target.closest('[data-action="clear-rating"]')){
@@ -2610,10 +2853,13 @@
         mvClear.rating = 0;
         if (!mvClear.order && !mvClear.interesting){
           delete item.votes[myKey];
+          render();
+          await removeVoteRemote(id, myKey);
+        } else {
+          render();
+          await persistVote(id, myKey);
         }
       }
-      render();
-      await persist();
       return;
     }
   });
@@ -2638,7 +2884,7 @@
       mv.displayName = state.currentUser.username;
       mv.updatedAt = Date.now();
       item.votes[myKey] = mv;
-      await persist();
+      await persistVote(id, myKey);
       if ((state.currentUser.achievements || []).indexOf('first_rating') === -1){
         var toShow = [];
         await updateCurrentUser(function(record){ awardAchievement(record, 'first_rating', toShow); });
@@ -2878,11 +3124,13 @@
     var row = delBtn.closest('.cat-row');
     var name = row.dataset.cat;
     if (confirm('Видалити категорію «' + name + '»? Товари з цієї категорії стануть «Без категорії».')){
-      removeCategory(name);
+      var affectedIds = removeCategory(name);
       renderCategoryOptions();
       render();
       await persistCategories();
-      await persist();
+      for (var i = 0; i < affectedIds.length; i++){
+        await persistItem(affectedIds[i]);
+      }
     }
   });
 
@@ -2917,7 +3165,9 @@
     if (toMarkRead.length){
       toMarkRead.forEach(function(q){ q.readByAsker = true; });
       refreshNoteBadges();
-      await persistQuestions();
+      for (var i = 0; i < toMarkRead.length; i++){
+        await persistQuestion(toMarkRead[i].id);
+      }
     }
   }
 
@@ -2994,7 +3244,7 @@
         delete state.notes[itemId][myKey];
       }
       closeNoteModal();
-      await persistNotes();
+      await persistNote(itemId, myKey);
     } else {
       var qText = document.getElementById('question-text-input').value.trim();
       if (!qText){
@@ -3003,8 +3253,9 @@
         return;
       }
       var isPublic = document.getElementById('question-public-checkbox').checked;
+      var newQid = uid();
       state.questions.push({
-        id: uid(),
+        id: newQid,
         itemId: itemId,
         itemName: (state.items[itemId] || {}).name || '',
         userKey: myKey,
@@ -3020,7 +3271,7 @@
       document.getElementById('question-public-checkbox').checked = false;
       render();
       renderQuestionsThread(itemId);
-      await persistQuestions();
+      await persistQuestion(newQid);
     }
   });
 
@@ -3049,7 +3300,7 @@
       q.readByAsker = true;
       node.remove();
       refreshNoteBadges();
-      await persistQuestions();
+      await persistQuestion(q.id);
     });
     queueToast('answer', node);
   }
@@ -3288,7 +3539,8 @@
     render();
     var btn = document.getElementById('submit-add');
     btn.disabled = true;
-    await persist();
+    await persistItem(id);
+    if (!editId) await persistIds();
     if (newCategoryAdded) await persistCategories();
     btn.disabled = false;
   });
