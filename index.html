@@ -967,6 +967,7 @@
       function pKey(key){ return 'priv:' + key; }
 
       return {
+        getAuthToken: ensureAuth,
         get: async function(key, shared){
           try{
             if (shared){
@@ -3067,11 +3068,45 @@
     }
   });
 
+  /* ===== PHOTO UPLOAD -> FIREBASE STORAGE (not embedded as base64) =====
+     Storing photos as base64 directly inside the catalog record used to mean
+     EVERY vote/edit re-uploaded/re-downloaded the ENTIRE catalog blob —
+     including every other product's photo — which is what was driving up
+     Firebase bandwidth usage. Now only a small download URL is stored in the
+     catalog; the actual image bytes live in Firebase Storage instead. */
+  var FIREBASE_STORAGE_BUCKET = 'auron-import.firebasestorage.app';
+
+  function canvasToBlob(canvas, type, quality){
+    return new Promise(function(resolve){
+      canvas.toBlob(function(blob){ resolve(blob); }, type, quality);
+    });
+  }
+
+  async function uploadPhotoToStorage(blob){
+    var token = await window.storage.getAuthToken();
+    var path = 'product-photos/' + uid() + '.jpg';
+    var uploadUrl = 'https://firebasestorage.googleapis.com/v0/b/' + FIREBASE_STORAGE_BUCKET +
+      '/o?uploadType=media&name=' + encodeURIComponent(path);
+    var res = await fetch(uploadUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': blob.type || 'image/jpeg',
+        'Authorization': 'Bearer ' + token
+      },
+      body: blob
+    });
+    if (!res.ok) throw new Error('Storage upload failed');
+    var data = await res.json();
+    var token2 = data.downloadTokens;
+    return 'https://firebasestorage.googleapis.com/v0/b/' + FIREBASE_STORAGE_BUCKET +
+      '/o/' + encodeURIComponent(path) + '?alt=media&token=' + token2;
+  }
+
   function processImageFile(file){
     var reader = new FileReader();
     reader.onload = function(ev){
       var img = new Image();
-      img.onload = function(){
+      img.onload = async function(){
         var maxW = 640;
         var scale = Math.min(1, maxW / img.width);
         var canvas = document.createElement('canvas');
@@ -3079,9 +3114,27 @@
         canvas.height = img.height * scale;
         var ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        photoDataUrl = canvas.toDataURL('image/jpeg', 0.72);
+
+        var localPreviewUrl = canvas.toDataURL('image/jpeg', 0.72);
         document.getElementById('f-photo-url').value = '';
-        document.getElementById('photo-preview').innerHTML = '<img src="' + photoDataUrl + '">';
+        document.getElementById('photo-preview').innerHTML = '<img src="' + localPreviewUrl + '">';
+        var statusEl = document.getElementById('fetch-1688-status');
+        if (statusEl){ statusEl.style.color = 'var(--text-faint)'; statusEl.textContent = 'Завантаження фото…'; }
+
+        try{
+          var blob = await canvasToBlob(canvas, 'image/jpeg', 0.72);
+          var downloadUrl = await uploadPhotoToStorage(blob);
+          photoDataUrl = null;
+          document.getElementById('f-photo-url').value = downloadUrl;
+          document.getElementById('photo-preview').innerHTML = '<img src="' + downloadUrl + '">';
+          if (statusEl){ statusEl.style.color = 'var(--green)'; statusEl.textContent = 'Фото завантажено.'; }
+        }catch(e){
+          // Storage unavailable (e.g. not enabled yet in the Firebase project) —
+          // fall back to the old base64-embed behaviour so uploading still works.
+          photoDataUrl = localPreviewUrl;
+          document.getElementById('photo-preview').innerHTML = '<img src="' + localPreviewUrl + '">';
+          if (statusEl){ statusEl.style.color = 'var(--text-faint)'; statusEl.textContent = ''; }
+        }
       };
       img.src = ev.target.result;
     };
@@ -3104,11 +3157,6 @@
         if (file){
           e.preventDefault();
           processImageFile(file);
-          var statusEl = document.getElementById('fetch-1688-status');
-          if (statusEl){
-            statusEl.style.color = 'var(--green)';
-            statusEl.textContent = 'Фото вставлено з буфера обміну.';
-          }
         }
         break;
       }
