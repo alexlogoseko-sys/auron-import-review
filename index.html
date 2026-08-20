@@ -929,8 +929,54 @@
     window.storage = (function(){
       var FIREBASE_DB_URL = 'https://auron-import-default-rtdb.europe-west1.firebasedatabase.app';
       var FIREBASE_API_KEY = 'AIzaSyCpBxbMQHuqRydFfiuiBOP1AvG0HClE1E4';
+      /* Persist the anonymous Firebase credentials across page reloads instead
+         of only holding them in a JS variable. Previously EVERY page load
+         (tab reopen, phone waking the browser, weak mobile connection causing
+         a reload, etc.) silently created a BRAND NEW anonymous account from
+         scratch — hundreds of throwaway accounts piled up in days, and if
+         that one network round-trip failed or was slow, the whole app acted
+         as if the user's session/data didn't exist ("logged out", "nothing
+         saved"), with zero visible error. Now we cache {idToken, refreshToken,
+         expiresAt} in localStorage and refresh the SAME identity instead of
+         minting a new one, and we retry once on transient failures instead of
+         silently giving up. */
+      var AUTH_CACHE_KEY = '__auron_fb_auth_v1__';
       var idToken = null;
+      var refreshTokenVal = null;
+      var expiresAt = 0;
       var authPromise = null;
+
+      function loadCachedAuth(){
+        try{
+          var raw = localStorage.getItem(AUTH_CACHE_KEY);
+          if (!raw) return;
+          var parsed = JSON.parse(raw);
+          if (parsed && parsed.refreshToken){
+            refreshTokenVal = parsed.refreshToken;
+            idToken = parsed.idToken || null;
+            expiresAt = parsed.expiresAt || 0;
+          }
+        }catch(e){ /* ignore corrupt cache */ }
+      }
+      loadCachedAuth();
+
+      function saveCachedAuth(){
+        try{
+          localStorage.setItem(AUTH_CACHE_KEY, JSON.stringify({
+            idToken: idToken, refreshToken: refreshTokenVal, expiresAt: expiresAt
+          }));
+        }catch(e){ /* localStorage unavailable — auth still works, just won't persist */ }
+      }
+
+      function applyTokenResponse(data, idField, refreshField, expiresField){
+        if (!data) return null;
+        idToken = data[idField] || null;
+        refreshTokenVal = data[refreshField] || refreshTokenVal;
+        var seconds = parseInt(data[expiresField], 10) || 3600;
+        expiresAt = Date.now() + (seconds * 1000) - 60000; // 60s safety margin
+        saveCachedAuth();
+        return idToken;
+      }
 
       function signInAnonymously(){
         return fetch('https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=' + FIREBASE_API_KEY, {
@@ -938,14 +984,37 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ returnSecureToken: true })
         }).then(function(r){ return r.ok ? r.json() : null; })
-          .then(function(data){ idToken = (data && data.idToken) || null; return idToken; })
+          .then(function(data){ return applyTokenResponse(data, 'idToken', 'refreshToken', 'expiresIn'); })
           .catch(function(){ return null; });
       }
 
+      // Refreshes the EXISTING anonymous identity instead of creating a new
+      // one — this is what stops the account churn and avoids a full
+      // re-auth round-trip (and its failure risk) on almost every page load.
+      function refreshExistingAuth(){
+        if (!refreshTokenVal) return Promise.resolve(null);
+        var body = 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(refreshTokenVal);
+        return fetch('https://securetoken.googleapis.com/v1/token?key=' + FIREBASE_API_KEY, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body
+        }).then(function(r){ return r.ok ? r.json() : null; })
+          .then(function(data){ return applyTokenResponse(data, 'id_token', 'refresh_token', 'expires_in'); })
+          .catch(function(){ return null; });
+      }
+
+      function doEnsureAuth(){
+        if (idToken && Date.now() < expiresAt) return Promise.resolve(idToken);
+        if (refreshTokenVal){
+          return refreshExistingAuth().then(function(t){ return t || signInAnonymously(); });
+        }
+        return signInAnonymously();
+      }
+
       function ensureAuth(){
-        if (idToken) return Promise.resolve(idToken);
+        if (idToken && Date.now() < expiresAt) return Promise.resolve(idToken);
         if (!authPromise){
-          authPromise = signInAnonymously().then(function(t){ authPromise = null; return t; });
+          authPromise = doEnsureAuth().then(function(t){ authPromise = null; return t; });
         }
         return authPromise;
       }
@@ -953,6 +1022,8 @@
       function fbUrl(path, token){
         return FIREBASE_DB_URL + '/shared/' + path + '.json' + (token ? '?auth=' + token : '');
       }
+
+      function delay(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
 
       async function authedRequest(path, opts){
         var token = await ensureAuth();
@@ -962,13 +1033,35 @@
           var freshToken = await ensureAuth();
           res = await fetch(fbUrl(path, freshToken), opts);
         }
+        // One short retry on network-level failures (dropped mobile
+        // connection, brief Firebase hiccup) so a momentary blip doesn't
+        // masquerade as "no data" / "logged out". fetch() itself throws on
+        // network errors, so this branch only covers server-side hiccups
+        // that surface as a bad status; true network errors are retried by
+        // the caller's try/catch below re-invoking this once more.
+        if (!res.ok && res.status >= 500){
+          await delay(700);
+          var retryToken = await ensureAuth();
+          res = await fetch(fbUrl(path, retryToken), opts);
+        }
         return res;
+      }
+
+      // Wraps authedRequest with one extra retry if the fetch itself throws
+      // (offline blip, DNS hiccup, phone waking from sleep mid-request).
+      async function authedRequestWithRetry(path, opts){
+        try{
+          return await authedRequest(path, opts);
+        }catch(e){
+          await delay(600);
+          return authedRequest(path, opts);
+        }
       }
 
       // Backward-compatible flat-key helper — used for small, rarely-contended
       // values (e.g. the categories list) where a full overwrite is fine.
       async function authedFetch(key, opts){
-        return authedRequest(encodeURIComponent(key), opts);
+        return authedRequestWithRetry(encodeURIComponent(key), opts);
       }
 
       function pKey(key){ return 'priv:' + key; }
@@ -985,7 +1078,7 @@
            full-blob overwrite. */
         getPath: async function(path){
           try{
-            var res = await authedRequest(path);
+            var res = await authedRequestWithRetry(path);
             if (!res.ok) return null;
             var data = await res.json();
             return (data === null || typeof data === 'undefined') ? null : data;
@@ -993,7 +1086,7 @@
         },
         setPath: async function(path, value){
           try{
-            var res = await authedRequest(path, {
+            var res = await authedRequestWithRetry(path, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(value)
@@ -1006,7 +1099,7 @@
         // only ever writes the "ivan" child, leaving every other user's vote intact.
         patchPath: async function(path, patchObj){
           try{
-            var res = await authedRequest(path, {
+            var res = await authedRequestWithRetry(path, {
               method: 'PATCH',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify(patchObj)
@@ -1016,7 +1109,7 @@
         },
         deletePath: async function(path){
           try{
-            var res = await authedRequest(path, { method: 'DELETE' });
+            var res = await authedRequestWithRetry(path, { method: 'DELETE' });
             return res.ok;
           }catch(e){ return false; }
         },
@@ -3626,6 +3719,20 @@
   /* ===== INIT ===== */
   (async function init(){
     var record = await trySession();
+    if (!record){
+      // A session name is saved locally, but the server lookup came back
+      // empty — before concluding the account doesn't exist, this could
+      // just be a transient network/auth hiccup on page load. Retry a
+      // couple of times (short backoff) so people aren't bounced to the
+      // login screen by a momentary connection blip.
+      var savedName = await safeGet('session-user', false);
+      if (savedName){
+        for (var attempt = 0; attempt < 2 && !record; attempt++){
+          await new Promise(function(res){ setTimeout(res, 900); });
+          record = await trySession();
+        }
+      }
+    }
     if (record){
       state.currentUser = record;
       await afterAuthSuccess();
