@@ -1202,30 +1202,37 @@
      any user who registered (or any change made) in that overlapping window.
      Per-user paths mean two different people's writes never touch the same
      Firebase node, so they can never clobber each other. */
-  var usersMigrationAttempted = false;
-
   async function getUsers(){
     var usersObj = await window.storage.getPath('users');
-    var looksMigrated = usersObj && typeof usersObj === 'object' && !Array.isArray(usersObj) &&
-      Object.keys(usersObj).every(function(k){ return usersObj[k] && typeof usersObj[k] === 'object'; });
-    if (looksMigrated) return usersObj;
+    // Guard against a transient read hiccup (e.g. an auth-token refresh
+    // racing the request) being mistaken for "no users exist yet" — that
+    // false-empty result previously caused a brand-new registrant to get
+    // assigned internalId 1, colliding with the real first user. Retry
+    // once before accepting an empty/null result as real.
+    if (!usersObj || typeof usersObj !== 'object' || Array.isArray(usersObj)){
+      await new Promise(function(resolve){ setTimeout(resolve, 400); });
+      usersObj = await window.storage.getPath('users');
+    }
+    if (!usersObj || typeof usersObj !== 'object' || Array.isArray(usersObj)) return {};
 
-    // Old single-blob format (a JSON *string* stored under the flat 'users'
-    // key) or nothing yet — recover what's there and migrate it once.
-    if (!usersMigrationAttempted){
-      usersMigrationAttempted = true;
-      var legacyRaw = await safeGet('users', true);
-      if (legacyRaw){
-        try{
-          var legacyUsers = JSON.parse(legacyRaw);
-          if (legacyUsers && typeof legacyUsers === 'object' && Object.keys(legacyUsers).length){
-            await window.storage.setPath('users', legacyUsers);
-            return legacyUsers;
-          }
-        }catch(e){ /* fall through */ }
+    // Self-healing: any record still stored under the OLD first-name-only
+    // key (from before last name became part of the key) gets moved to its
+    // correct name+lastName key. Needed so two people who share a first
+    // name can each get their own unique account/vote identity.
+    var keys = Object.keys(usersObj);
+    for (var i = 0; i < keys.length; i++){
+      var oldKey = keys[i];
+      var rec = usersObj[oldKey];
+      if (!rec || !rec.username) continue;
+      var correctKey = nameKey(rec.username, rec.lastName);
+      if (correctKey !== oldKey && !usersObj[correctKey]){
+        usersObj[correctKey] = rec;
+        delete usersObj[oldKey];
+        await window.storage.setPath('users/' + correctKey, rec);
+        await window.storage.deletePath('users/' + oldKey);
       }
     }
-    return {};
+    return usersObj;
   }
 
   // Bulk overwrite — ONLY for the explicit "restore from backup" admin
@@ -1240,8 +1247,15 @@
     return window.storage.setPath('users/' + key, record);
   }
 
-  function normName(n){ return n.trim(); }
-  function nameKey(n){ return normName(n).toLowerCase(); }
+  function normName(n){ return (n || '').trim(); }
+  // Uniqueness (and the Firebase storage path) is based on FIRST + LAST name
+  // together — otherwise two different people who happen to share a first
+  // name (e.g. two "Дмитро"s) could never both register, and worse, their
+  // votes/notes would collide under the same key. Last name is mandatory
+  // everywhere it matters, so this is always well-defined.
+  function nameKey(username, lastName){
+    return (normName(username) + '::' + normName(lastName || '')).toLowerCase();
+  }
 
   /* Assigns a permanent internalId (1, 2, 3…) in registration order to any
      user missing one — runs once as a transparent backfill for accounts
@@ -1280,10 +1294,13 @@
   async function registerUser(name, lastName, password){
     name = normName(name);
     lastName = normName(lastName || '');
+    if (!lastName){
+      return {ok:false, error:'Прізвище обовʼязкове.'};
+    }
     var users = await getUsers();
-    var key = nameKey(name);
+    var key = nameKey(name, lastName);
     if (users[key]){
-      return {ok:false, error:'Користувач з таким імʼям уже існує.'};
+      return {ok:false, error:'Користувач з таким імʼям і прізвищем уже існує.'};
     }
     var changedLegacyKeys = ensureAllInternalIds(users);
     var assignedId = nextInternalId(users);
@@ -1373,19 +1390,27 @@
   async function loginUser(name, lastName, password){
     name = normName(name);
     lastName = normName(lastName || '');
+    if (!lastName){
+      return {ok:false, error:'Введіть прізвище.'};
+    }
     var users = await getUsers();
-    var key = nameKey(name);
+    var key = nameKey(name, lastName);
     var record = users[key];
+    var legacyKeyUsed = null;
+    if (!record){
+      // Bridge for a genuinely old account that has no last name on file yet
+      // (from before last name became part of the account key).
+      var fallbackKey = nameKey(name, '');
+      if (users[fallbackKey] && !users[fallbackKey].lastName){
+        record = users[fallbackKey];
+        legacyKeyUsed = fallbackKey;
+      }
+    }
     if (!record || !(await verifyPassword(password, record.passwordHash))){
       return {ok:false, error:'Невірне імʼя, прізвище або пароль.'};
     }
     var needsSave = false;
-    if (record.lastName){
-      if (record.lastName.toLowerCase() !== lastName.toLowerCase()){
-        return {ok:false, error:'Невірне імʼя, прізвище або пароль.'};
-      }
-    } else if (lastName){
-      // legacy account created before the last-name field existed — record it now
+    if (legacyKeyUsed){
       record.lastName = lastName;
       needsSave = true;
     }
@@ -1400,15 +1425,19 @@
     if (idKeysChanged.indexOf(key) > -1) needsSave = true;
     var changedLegacyKeys = idKeysChanged.filter(function(k){ return k !== key; });
     if (needsSave) await saveOneUser(key, record);
+    if (legacyKeyUsed) await window.storage.deletePath('users/' + legacyKeyUsed);
     if (changedLegacyKeys.length) await persistChangedUsers(users, changedLegacyKeys);
     return {ok:true, user: record};
   }
 
   async function trySession(){
-    var savedName = await safeGet('session-user', false);
-    if (!savedName) return null;
+    var saved = await safeGet('session-user', false);
+    if (!saved) return null;
+    var parts = saved.split('::');
+    var savedName = parts[0] || '';
+    var savedLastName = parts[1] || '';
     var users = await getUsers();
-    var key = nameKey(savedName);
+    var key = nameKey(savedName, savedLastName);
     var record = users[key];
     if (!record) return null;
     var needsSave = await ensureRole(record);
@@ -1420,8 +1449,8 @@
     return record;
   }
 
-  async function setSession(username){
-    await safeSet('session-user', username, false);
+  async function setSession(username, lastName){
+    await safeSet('session-user', username + '::' + (lastName || ''), false);
   }
   async function clearSession(){
     await safeSet('session-user', '', false);
@@ -1435,12 +1464,12 @@
   async function updateCurrentUser(mutateFn){
     var current = state.currentUser;
     if (!current) return;
-    var key = nameKey(current.username);
+    var key = nameKey(current.username, current.lastName);
     var record = (await window.storage.getPath('users/' + key)) || current;
     mutateFn(record);
     // Re-check after the await: the user may have logged out (or switched
     // accounts) while this request was in flight — don't resurrect a stale session.
-    if (state.currentUser && nameKey(state.currentUser.username) === key){
+    if (state.currentUser && nameKey(state.currentUser.username, state.currentUser.lastName) === key){
       state.currentUser = record;
     }
     await saveOneUser(key, record);
@@ -1496,6 +1525,14 @@
       changes: [
         'Права адміністратора тепер надійно закріплені лише за конкретним акаунтом — більше ніхто не може отримати їх, зареєструвавшись під тим самим імʼям.',
         'Прибрано інструмент оптимізації фото (усі фото вже перенесено).'
+      ]
+    },
+    {
+      version: '1.6',
+      changes: [
+        'Виправлено рідкісний, але серйозний баг: акаунти могли зникати через тимчасовий збій зʼєднання під час реєстрації нового користувача.',
+        'Тепер двоє людей з однаковим імʼям (наприклад, два Дмитра) можуть зареєструватися — унікальність визначається за імʼям і прізвищем разом.',
+        'Додано резервну перевірку зʼєднання з базою даних перед будь-яким важливим записом.'
       ]
     }
   ];
@@ -1752,7 +1789,7 @@
     submitBtn.disabled = false;
     if (!res.ok){ errEl.textContent = res.error; return; }
     state.currentUser = res.user;
-    await setSession(res.user.username);
+    await setSession(res.user.username, res.user.lastName);
     await afterAuthSuccess();
   });
 
@@ -1773,7 +1810,7 @@
     submitBtn.disabled = false;
     if (!res.ok){ errEl.textContent = res.error; return; }
     state.currentUser = res.user;
-    await setSession(res.user.username);
+    await setSession(res.user.username, res.user.lastName);
     await afterAuthSuccess();
   });
 
@@ -1796,25 +1833,15 @@
      voting on the same one) never clobber each other. Votes specifically use
      a PATCH so even two people voting on the SAME product at the same time
      each only touch their own vote entry. */
-  var catalogMigrationAttempted = false;
-
   async function loadCatalog(){
     var data = await window.storage.getPath('catalog');
-    var looksMigrated = data && typeof data === 'object' && !Array.isArray(data);
-
-    if (!looksMigrated && !catalogMigrationAttempted){
-      catalogMigrationAttempted = true;
-      var legacyRaw = await safeGet('catalog', true);
-      if (legacyRaw){
-        try{
-          var legacy = JSON.parse(legacyRaw);
-          if (legacy && typeof legacy === 'object'){
-            var migrated = { ids: legacy.ids || [], items: legacy.items || {} };
-            await window.storage.setPath('catalog', migrated);
-            data = migrated;
-          }
-        }catch(e){ /* fall through */ }
-      }
+    if (!data || typeof data !== 'object' || Array.isArray(data)){
+      // Guard against a transient read failure being mistaken for "empty
+      // catalog" — that false-empty result is exactly what previously made
+      // products seem to vanish (a subsequent add/edit would then persist
+      // a truncated id list, orphaning every other product).
+      await new Promise(function(resolve){ setTimeout(resolve, 400); });
+      data = await window.storage.getPath('catalog');
     }
 
     if (data && typeof data === 'object'){
@@ -1889,43 +1916,11 @@
   }
 
   /* ===== NOTES & QUESTIONS ===== */
-  var threadsMigrationAttempted = false;
-
   async function loadThreads(){
     var qData = await window.storage.getPath('questions');
-    var looksMigratedQ = qData && typeof qData === 'object' && !Array.isArray(qData);
+    if (qData && typeof qData !== 'object') qData = null;
     var nData = await window.storage.getPath('notes');
-    var looksMigratedN = nData && typeof nData === 'object' && !Array.isArray(nData);
-
-    if ((!looksMigratedQ || !looksMigratedN) && !threadsMigrationAttempted){
-      threadsMigrationAttempted = true;
-      if (!looksMigratedQ){
-        var rawQ = await safeGet('questions', true);
-        if (rawQ){
-          try{
-            var legacyQ = JSON.parse(rawQ);
-            if (Array.isArray(legacyQ) && legacyQ.length){
-              var qMap = {};
-              legacyQ.forEach(function(q){ if (q && q.id) qMap[q.id] = q; });
-              await window.storage.setPath('questions', qMap);
-              qData = qMap;
-            }
-          }catch(e){ /* fall through */ }
-        }
-      }
-      if (!looksMigratedN){
-        var rawN = await safeGet('notes', true);
-        if (rawN){
-          try{
-            var legacyN = JSON.parse(rawN);
-            if (legacyN && typeof legacyN === 'object'){
-              await window.storage.setPath('notes', legacyN);
-              nData = legacyN;
-            }
-          }catch(e){ /* fall through */ }
-        }
-      }
-    }
+    if (nData && typeof nData !== 'object') nData = null;
 
     state.questions = qData ? Object.keys(qData).map(function(k){ return qData[k]; }) : [];
     state.notes = (nData && typeof nData === 'object') ? nData : {};
@@ -2091,7 +2086,7 @@
 
   function myVote(item){
     if (!state.currentUser) return {order:false, interesting:false, rating: 0};
-    var key = nameKey(state.currentUser.username);
+    var key = nameKey(state.currentUser.username, state.currentUser.lastName);
     return (item.votes && item.votes[key]) || {order:false, interesting:false, rating: 0};
   }
 
@@ -2129,7 +2124,7 @@
         '<span class="r">' + v.rating + '/10</span></span></div>';
     }).join('') : '<div style="color:var(--text-faint);font-size:11.5px;padding:4px 0">Ще ніхто не оцінив</div>';
 
-    var myKey = state.currentUser ? nameKey(state.currentUser.username) : null;
+    var myKey = state.currentUser ? nameKey(state.currentUser.username, state.currentUser.lastName) : null;
     var badgeCount = noteBadgeCount(id, isAdmin, myKey);
 
     return '' +
@@ -2215,7 +2210,7 @@
         return it && ((it.name||'').toLowerCase().indexOf(q) > -1 || (it.description||'').toLowerCase().indexOf(q) > -1);
       });
     }
-    var myKey = state.currentUser ? nameKey(state.currentUser.username) : null;
+    var myKey = state.currentUser ? nameKey(state.currentUser.username, state.currentUser.lastName) : null;
     if (state.filter === 'unrated' && myKey){
       list = list.filter(function(id){ var it = state.items[id]; return !(it.votes && it.votes[myKey]); });
     } else if (state.filter === 'order'){
@@ -2250,7 +2245,7 @@
       return it && itemVisibleToUser(it, state.currentUser);
     });
     var total = visibleIds.length;
-    var myKey = state.currentUser ? nameKey(state.currentUser.username) : null;
+    var myKey = state.currentUser ? nameKey(state.currentUser.username, state.currentUser.lastName) : null;
     // "Оцінено" means the user actually set a 0–10 rating — just checking
     // "Замовити"/"Цікаво" (which creates a vote record with rating:0) must
     // NOT count as rated, otherwise the counters drift out of sync with reality.
@@ -2487,9 +2482,10 @@
       '</tr></thead><tbody>' +
       userList.sort(function(a,b){ return (a.internalId||0) - (b.internalId||0); }).map(function(u){
         var isOnline = u.lastSeenAt && (now - u.lastSeenAt) < ONLINE_WINDOW_MS;
+        var uKey = nameKey(u.username, u.lastName);
         var roleCell = u.role === 'admin'
           ? '<span style="color:var(--accent);font-weight:600;font-size:12.5px">Адмін</span>'
-          : '<select class="role-select" data-username="' + escapeHtml(u.username) + '" style="width:auto;padding:4px 8px;font-size:12.5px">' +
+          : '<select class="role-select" data-key="' + escapeHtml(uKey) + '" style="width:auto;padding:4px 8px;font-size:12.5px">' +
               '<option value="manager"' + (u.role === 'manager' ? ' selected' : '') + '>Менеджер</option>' +
               '<option value="lead"' + (u.role === 'lead' ? ' selected' : '') + '>Керівник</option>' +
             '</select>';
@@ -2504,7 +2500,7 @@
           '<td>' + formatDuration(u.totalTimeMs) + '</td>' +
           '<td>' + ((u.achievements || []).length) + '/' + Object.keys(ACHIEVEMENTS).length + '</td>' +
           '<td>' + (isOnline ? '<span class="online-dot"></span>Онлайн' : '—') + '</td>' +
-          '<td><button class="btn btn-ghost edit-user-btn" data-username="' + escapeHtml(u.username) + '" style="padding:5px 10px;font-size:12px">Редагувати</button></td>' +
+          '<td><button class="btn btn-ghost edit-user-btn" data-key="' + escapeHtml(uKey) + '" style="padding:5px 10px;font-size:12px">Редагувати</button></td>' +
         '</tr>';
       }).join('') + '</tbody></table>';
 
@@ -2576,14 +2572,13 @@
 
     document.querySelectorAll('.role-select').forEach(function(sel){
       sel.addEventListener('change', async function(e){
-        var username = e.target.dataset.username;
+        var key = e.target.dataset.key;
         var newRole = e.target.value;
-        var key = nameKey(username);
         var record = await window.storage.getPath('users/' + key);
         if (record){
           record.role = newRole;
           await saveOneUser(key, record);
-          if (state.currentUser && nameKey(state.currentUser.username) === key){
+          if (state.currentUser && nameKey(state.currentUser.username, state.currentUser.lastName) === key){
             state.currentUser.role = newRole;
           }
         }
@@ -2592,7 +2587,7 @@
     });
 
     document.querySelectorAll('.edit-user-btn').forEach(function(btn){
-      btn.addEventListener('click', function(){ openEditUserModal(btn.dataset.username); });
+      btn.addEventListener('click', function(){ openEditUserModal(btn.dataset.key); });
     });
   }
 
@@ -2600,14 +2595,14 @@
   var editUserOverlay = document.getElementById('edit-user-modal-overlay');
   var editUserError = document.getElementById('edit-user-error');
 
-  function openEditUserModal(username){
-    state.editingUsername = username;
+  function openEditUserModal(key){
+    state.editingUserKey = key;
     editUserError.style.display = 'none';
     document.getElementById('eu-password').value = '';
     document.getElementById('eu-password2').value = '';
 
     getUsers().then(function(users){
-      var record = users[nameKey(username)];
+      var record = users[key];
       if (!record) return;
       var isAdminRow = record.role === 'admin';
       document.getElementById('edit-user-sub').textContent = 'ID ' + (record.internalId != null ? record.internalId : '—') + ' · зареєстрований ' +
@@ -2615,18 +2610,19 @@
       document.getElementById('eu-name').value = record.username;
       document.getElementById('eu-name').disabled = isAdminRow;
       document.getElementById('eu-lastname').value = record.lastName || '';
+      document.getElementById('eu-lastname').disabled = isAdminRow;
       editUserOverlay.classList.add('open');
     });
   }
 
-  function closeEditUserModal(){ editUserOverlay.classList.remove('open'); state.editingUsername = null; }
+  function closeEditUserModal(){ editUserOverlay.classList.remove('open'); state.editingUserKey = null; }
 
   document.getElementById('cancel-edit-user').addEventListener('click', closeEditUserModal);
   editUserOverlay.addEventListener('click', function(e){ if (e.target === editUserOverlay) closeEditUserModal(); });
 
   document.getElementById('save-edit-user').addEventListener('click', async function(){
-    var origUsername = state.editingUsername;
-    if (!origUsername) return;
+    var origKey = state.editingUserKey;
+    if (!origKey) return;
     editUserError.style.display = 'none';
 
     var newName = document.getElementById('eu-name').value.trim();
@@ -2634,9 +2630,9 @@
     var newPass = document.getElementById('eu-password').value;
     var newPass2 = document.getElementById('eu-password2').value;
 
-    if (!newName){
+    if (!newName || !newLastName){
       editUserError.style.display = 'block';
-      editUserError.querySelector('span').textContent = 'Імʼя не може бути порожнім.';
+      editUserError.querySelector('span').textContent = 'Імʼя та прізвище не можуть бути порожніми.';
       return;
     }
     if (newPass && newPass.length < 4){
@@ -2651,16 +2647,15 @@
     }
 
     var users = await getUsers();
-    var origKey = nameKey(origUsername);
     var record = users[origKey];
     if (!record) { closeEditUserModal(); return; }
 
     var isAdminRow = record.role === 'admin';
-    var newKey = nameKey(newName);
+    var newKey = nameKey(newName, newLastName);
 
     if (!isAdminRow && newKey !== origKey && users[newKey]){
       editUserError.style.display = 'block';
-      editUserError.querySelector('span').textContent = 'Користувач з таким імʼям уже існує.';
+      editUserError.querySelector('span').textContent = 'Користувач з таким імʼям і прізвищем уже існує.';
       return;
     }
 
@@ -2682,7 +2677,7 @@
 
     btn.disabled = false;
 
-    if (state.currentUser && nameKey(state.currentUser.username) === origKey){
+    if (state.currentUser && nameKey(state.currentUser.username, state.currentUser.lastName) === origKey){
       state.currentUser = record;
     }
 
@@ -2715,7 +2710,7 @@
     statusEl.textContent = 'Видаляємо користувачів…';
 
     var users = await getUsers();
-    var myKey = nameKey(state.currentUser.username);
+    var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
     var otherKeys = Object.keys(users).filter(function(k){ return k !== myKey; });
     for (var i = 0; i < otherKeys.length; i++){
       statusEl.textContent = 'Видаляємо користувачів… ' + (i + 1) + ' з ' + otherKeys.length;
@@ -2825,7 +2820,7 @@
     var item = state.items[id];
     if (!item || !state.currentUser) return;
     var isAdmin = state.currentUser.isAdmin;
-    var myKey = nameKey(state.currentUser.username);
+    var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
 
     if (e.target.closest('[data-action="view-photo"]')){
       if (item.photo) openLightbox(item.photo, item.name);
@@ -2921,7 +2916,7 @@
       var card = e.target.closest('.card');
       var id = card.dataset.id;
       var item = state.items[id];
-      var myKey = nameKey(state.currentUser.username);
+      var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
       item.votes = item.votes || {};
       var mv = item.votes[myKey] || {order:false, interesting:false, rating:0};
       mv.rating = parseInt(e.target.value, 10) || 0;
@@ -3193,7 +3188,7 @@
 
     setNoteQuestionMode('note');
 
-    var myKey = nameKey(state.currentUser.username);
+    var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
     var myNote = (state.notes[itemId] && state.notes[itemId][myKey]) || '';
     document.getElementById('note-text-input').value = myNote;
     document.getElementById('question-text-input').value = '';
@@ -3233,7 +3228,7 @@
   /* Lightweight badge refresh without a full grid re-render (keeps open dropdowns intact) */
   function refreshNoteBadges(){
     var isAdmin = state.currentUser && state.currentUser.isAdmin;
-    var myKey = state.currentUser ? nameKey(state.currentUser.username) : null;
+    var myKey = state.currentUser ? nameKey(state.currentUser.username, state.currentUser.lastName) : null;
     document.querySelectorAll('.card[data-id]').forEach(function(cardEl){
       var id = cardEl.dataset.id;
       var btn = cardEl.querySelector('.card-note-btn');
@@ -3252,7 +3247,7 @@
 
   function renderQuestionsThread(itemId){
     var isAdmin = state.currentUser && state.currentUser.isAdmin;
-    var myKey = nameKey(state.currentUser.username);
+    var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
     var list = (state.questions || []).filter(function(q){
       return q.itemId === itemId && (q.isPublic || isAdmin || q.userKey === myKey);
     }).sort(function(a,b){ return b.createdAt - a.createdAt; });
@@ -3277,7 +3272,7 @@
   document.getElementById('submit-note-question').addEventListener('click', async function(){
     var itemId = state.noteModalItemId;
     if (!itemId || !state.currentUser) return;
-    var myKey = nameKey(state.currentUser.username);
+    var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
 
     if (state.noteModalMode === 'note'){
       var text = document.getElementById('note-text-input').value.trim();
@@ -3325,7 +3320,7 @@
 
   async function checkAnsweredQuestions(){
     if (!state.currentUser) return;
-    var myKey = nameKey(state.currentUser.username);
+    var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
     var unread = (state.questions || []).filter(function(q){
       return q.userKey === myKey && q.answer && !q.readByAsker && !state.shownAnswerToastIds[q.id];
     });
