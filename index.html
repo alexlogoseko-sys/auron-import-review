@@ -910,6 +910,7 @@
 <script>
 (function(){
   var ADMIN_NAME = 'Олександр';
+  var ADMIN_LASTNAME = 'Бойко';
 
   /* ===== STORAGE SHIM =====
      Поза середовищем Claude.ai (наприклад, на GitHub Pages) немає window.storage.
@@ -1278,19 +1279,22 @@
 
   async function registerUser(name, lastName, password){
     name = normName(name);
+    lastName = normName(lastName || '');
     var users = await getUsers();
     var key = nameKey(name);
     if (users[key]){
       return {ok:false, error:'Користувач з таким імʼям уже існує.'};
     }
     var changedLegacyKeys = ensureAllInternalIds(users);
+    var assignedId = nextInternalId(users);
+    var isAdminNow = await resolveIsAdmin({ username: name, lastName: lastName, internalId: assignedId });
     var record = {
       username: name,
-      lastName: normName(lastName || ''),
-      internalId: nextInternalId(users),
+      lastName: lastName,
+      internalId: assignedId,
       passwordHash: await hashPassword(password),
-      isAdmin: name === ADMIN_NAME,
-      role: name === ADMIN_NAME ? 'admin' : 'manager',
+      isAdmin: isAdminNow,
+      role: isAdminNow ? 'admin' : 'manager',
       createdAt: Date.now(),
       termsAccepted: false,
       visits: [],
@@ -1305,14 +1309,49 @@
     return {ok:true, user: record};
   }
 
+  /* ===== ADMIN IDENTITY LOCK =====
+     Admin rights must belong to exactly one specific account — "Олександр
+     Бойко" — and never to anyone else who happens to register with the same
+     first name. A name match alone isn't enough (anyone could type
+     "Олександр"), so the FIRST account that matches BOTH first and last name
+     permanently claims a lock (stored at shared/adminLock, keyed by that
+     account's internalId). After that, admin rights require matching this
+     exact locked internalId — a name match by itself is no longer sufficient,
+     so a same-named account created later never gains admin. */
+  var adminLockCache; // undefined = not fetched yet, null = fetched & empty, object = {internalId}
+
+  async function getAdminLock(){
+    if (adminLockCache !== undefined) return adminLockCache;
+    adminLockCache = await window.storage.getPath('adminLock');
+    return adminLockCache;
+  }
+
+  async function resolveIsAdmin(record){
+    var nameMatches =
+      normName(record.username || '').toLowerCase() === ADMIN_NAME.toLowerCase() &&
+      normName(record.lastName || '').toLowerCase() === ADMIN_LASTNAME.toLowerCase();
+    if (!nameMatches) return false;
+    var lock = await getAdminLock();
+    if (!lock){
+      // First (and only) time this exact identity can ever claim admin.
+      lock = { internalId: record.internalId, claimedAt: Date.now() };
+      await window.storage.setPath('adminLock', lock);
+      adminLockCache = lock;
+      return true;
+    }
+    return lock.internalId === record.internalId;
+  }
+
   /* Existing accounts created before roles existed don't have a `role`
      field yet — migrate them the first time we touch their record. Admin
-     status always tracks ADMIN_NAME, never a stored flag someone could tamper with. */
-  function ensureRole(record){
-    var correctRole = record.username === ADMIN_NAME ? 'admin' : (record.role || 'manager');
-    if (record.username === ADMIN_NAME) correctRole = 'admin';
-    if (record.role !== correctRole){
+     status is resolved via the identity lock above, never trusted from a
+     stored flag someone could tamper with. */
+  async function ensureRole(record){
+    var isAdminNow = await resolveIsAdmin(record);
+    var correctRole = isAdminNow ? 'admin' : (record.role === 'admin' ? 'manager' : (record.role || 'manager'));
+    if (record.role !== correctRole || !!record.isAdmin !== isAdminNow){
       record.role = correctRole;
+      record.isAdmin = isAdminNow;
       return true;
     }
     return false;
@@ -1356,7 +1395,7 @@
       record.passwordHash = await hashPassword(password);
       needsSave = true;
     }
-    if (ensureRole(record)) needsSave = true;
+    if (await ensureRole(record)) needsSave = true;
     var idKeysChanged = ensureAllInternalIds(users);
     if (idKeysChanged.indexOf(key) > -1) needsSave = true;
     var changedLegacyKeys = idKeysChanged.filter(function(k){ return k !== key; });
@@ -1372,7 +1411,7 @@
     var key = nameKey(savedName);
     var record = users[key];
     if (!record) return null;
-    var needsSave = ensureRole(record);
+    var needsSave = await ensureRole(record);
     var idKeysChanged2 = ensureAllInternalIds(users);
     if (idKeysChanged2.indexOf(key) > -1) needsSave = true;
     var changedLegacyKeys2 = idKeysChanged2.filter(function(k){ return k !== key; });
@@ -1450,6 +1489,13 @@
         'Виправлено критичну помилку, через яку користувачі та товари могли зникати при одночасній роботі кількох людей на сайті.',
         'Дані тепер зберігаються надійніше — кожен користувач і товар мають окремий запис у базі.',
         'Фото товарів переносяться у Firebase Storage замість бази даних — швидше й дешевше.'
+      ]
+    },
+    {
+      version: '1.5',
+      changes: [
+        'Права адміністратора тепер надійно закріплені лише за конкретним акаунтом — більше ніхто не може отримати їх, зареєструвавшись під тим самим імʼям.',
+        'Прибрано інструмент оптимізації фото (усі фото вже перенесено).'
       ]
     }
   ];
@@ -2435,11 +2481,6 @@
     var now = Date.now();
     var onlineCount = userList.filter(function(u){ return u.lastSeenAt && (now - u.lastSeenAt) < ONLINE_WINDOW_MS; }).length;
 
-    var legacyPhotoCount = state.ids.filter(function(id){
-      var it = state.items[id];
-      return it && it.photo && it.photo.indexOf('data:') === 0;
-    }).length;
-
     var usersTableHtml = '<table class="admin-table"><thead><tr>' +
       '<th>ID</th><th>Імʼя</th><th>Прізвище</th><th>Роль</th><th>Дата реєстрації</th><th>Відвідувань</th><th>Останній візит</th>' +
       '<th>Загальний час</th><th>Ачівки</th><th>Статус</th><th></th>' +
@@ -2495,6 +2536,13 @@
       '</div>' +
 
       '<div class="admin-section">' +
+        '<h3 class="h-display" style="font-size:17px;margin-bottom:10px;color:var(--red)">Скидання даних (незворотно)</h3>' +
+        '<p class="sub" style="margin-bottom:12px">Видаляє всі акаунти користувачів, окрім вашого, і скидає всі оцінки/голоси на кожному товарі. Товари, категорії, питання та примітки НЕ видаляються. Усі, крім вас, будуть змушені зареєструватися заново.</p>' +
+        '<button class="btn btn-ghost" id="reset-data-btn" style="border-color:var(--red);color:var(--red)">Скинути користувачів та оцінки</button>' +
+        '<div id="reset-data-status" class="sub" style="margin-top:8px;font-size:12px"></div>' +
+      '</div>' +
+
+      '<div class="admin-section">' +
         '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Резервна копія даних</h3>' +
         '<p class="sub" style="margin-bottom:12px">Завантажте повний знімок усіх даних сайту (товари, категорії, користувачі, питання, примітки) у файл .json. Цей файл можна зберегти на комп\u2019ютері або перенести на інший хостинг/базу.</p>' +
         '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
@@ -2502,15 +2550,6 @@
           '<button class="btn btn-ghost upload-btn" type="button">Відновити з файлу<input type="file" id="import-backup-file" accept="application/json"></button>' +
         '</div>' +
         '<div id="backup-status" class="sub" style="margin-top:8px;font-size:12px"></div>' +
-      '</div>' +
-
-      '<div class="admin-section">' +
-        '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Оптимізація трафіку Firebase</h3>' +
-        '<p class="sub" style="margin-bottom:12px">' + legacyPhotoCount + ' з ' + state.ids.length + ' товарів мають фото, вбудоване прямо в базу даних (старий формат) — це роздуває трафік, бо повне фото завантажується/вивантажується щоразу, коли ХТОСЬ ставить оцінку будь-якому товару. Натисніть, щоб перенести їх у Firebase Storage — у базі залишаться лише короткі посилання.</p>' +
-        '<button class="btn btn-primary" id="migrate-photos-btn"' + (legacyPhotoCount ? '' : ' disabled') + '>' +
-          (legacyPhotoCount ? 'Перенести ' + legacyPhotoCount + ' фото у Storage' : 'Усі фото вже оптимізовано ✓') +
-        '</button>' +
-        '<div id="migrate-photos-status" class="sub" style="margin-top:8px;font-size:12px"></div>' +
       '</div>' +
 
       '<div class="admin-section">' +
@@ -2532,8 +2571,8 @@
     if (exportBtn) exportBtn.addEventListener('click', exportBackup);
     var importInput = document.getElementById('import-backup-file');
     if (importInput) importInput.addEventListener('change', importBackup);
-    var migrateBtn = document.getElementById('migrate-photos-btn');
-    if (migrateBtn) migrateBtn.addEventListener('click', migrateLegacyPhotos);
+    var resetBtn = document.getElementById('reset-data-btn');
+    if (resetBtn) resetBtn.addEventListener('click', resetUsersAndVotes);
 
     document.querySelectorAll('.role-select').forEach(function(sel){
       sel.addEventListener('change', async function(e){
@@ -2654,43 +2693,48 @@
   /* ===== BACKUP / RESTORE (admin only) =====
      Downloads/reads every shared key so the whole dataset can be moved to a
      different backend or hosting provider if needed. */
-  /* ===== MIGRATE LEGACY BASE64 PHOTOS -> FIREBASE STORAGE (admin only) =====
-     One-time cleanup for products added before photo uploads went through
-     Storage. Converts each embedded base64 photo to a Storage download URL
-     and rewrites the catalog once at the end. */
-  async function migrateLegacyPhotos(){
-    var btn = document.getElementById('migrate-photos-btn');
-    var statusEl = document.getElementById('migrate-photos-status');
-    var targets = state.ids.filter(function(id){
-      var it = state.items[id];
-      return it && it.photo && it.photo.indexOf('data:') === 0;
-    });
-    if (!targets.length) return;
+  /* ===== RESET USERS & VOTES (admin only, irreversible) =====
+     Deletes every user account except the caller's own, and clears the
+     votes object on every catalog item. Products/categories/questions/notes
+     are left untouched. Recommends taking a backup export first. */
+  async function resetUsersAndVotes(){
+    var statusEl = document.getElementById('reset-data-status');
+    var btn = document.getElementById('reset-data-btn');
+    if (!state.currentUser || !state.currentUser.isAdmin) return;
+
+    var confirm1 = confirm(
+      'Це видалить УСІХ користувачів, крім вас, і скине всі оцінки/голоси на кожному товарі. ' +
+      'Товари й категорії залишаться. Дію неможливо скасувати.\n\n' +
+      'Рекомендується спочатку натиснути «Завантажити резервну копію» вище. Продовжити?'
+    );
+    if (!confirm1) return;
+    var confirm2 = confirm('Ви ТОЧНО впевнені? Це останнє підтвердження.');
+    if (!confirm2) return;
 
     btn.disabled = true;
-    var done = 0;
-    var failed = 0;
-    var doneIds = [];
-    for (var i = 0; i < targets.length; i++){
-      var id = targets[i];
-      statusEl.textContent = 'Переносимо фото ' + (i + 1) + ' з ' + targets.length + '…';
-      try{
-        var dataUrl = state.items[id].photo;
-        var blob = await (await fetch(dataUrl)).blob();
-        var downloadUrl = await uploadPhotoToStorage(blob);
-        state.items[id].photo = downloadUrl;
-        doneIds.push(id);
-        done++;
-      }catch(e){
-        failed++;
+    statusEl.textContent = 'Видаляємо користувачів…';
+
+    var users = await getUsers();
+    var myKey = nameKey(state.currentUser.username);
+    var otherKeys = Object.keys(users).filter(function(k){ return k !== myKey; });
+    for (var i = 0; i < otherKeys.length; i++){
+      statusEl.textContent = 'Видаляємо користувачів… ' + (i + 1) + ' з ' + otherKeys.length;
+      await window.storage.deletePath('users/' + otherKeys[i]);
+    }
+
+    statusEl.textContent = 'Скидаємо оцінки на товарах…';
+    for (var j = 0; j < state.ids.length; j++){
+      var id = state.ids[j];
+      if (state.items[id]){
+        state.items[id].votes = {};
+        await window.storage.deletePath('catalog/items/' + id + '/votes');
       }
     }
-    for (var j = 0; j < doneIds.length; j++){
-      await persistItem(doneIds[j]);
-    }
-    statusEl.textContent = 'Готово: перенесено ' + done + (failed ? ', не вдалося ' + failed : '') + '.';
-    statusEl.style.color = failed ? 'var(--red)' : 'var(--green)';
-    renderAdmin();
+
+    statusEl.textContent = 'Готово. Оновіть сторінку.';
+    statusEl.style.color = 'var(--green)';
+    btn.disabled = false;
+    render();
   }
 
   async function exportBackup(){
