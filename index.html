@@ -891,9 +891,12 @@
 
     <div id="edit-user-error" class="err-banner" style="display:none;margin-top:10px"><span></span></div>
 
-    <div class="modal-actions">
-      <button class="btn btn-ghost" id="cancel-edit-user">Скасувати</button>
-      <button class="btn btn-primary" id="save-edit-user">Зберегти</button>
+    <div class="modal-actions" style="justify-content:space-between">
+      <button class="btn btn-ghost" id="delete-user-btn" style="border-color:var(--red);color:var(--red)">Видалити користувача</button>
+      <div style="display:flex;gap:10px">
+        <button class="btn btn-ghost" id="cancel-edit-user">Скасувати</button>
+        <button class="btn btn-primary" id="save-edit-user">Зберегти</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1215,22 +1218,66 @@
     }
     if (!usersObj || typeof usersObj !== 'object' || Array.isArray(usersObj)) return {};
 
-    // Self-healing: any record still stored under the OLD first-name-only
-    // key (from before last name became part of the key) gets moved to its
-    // correct name+lastName key. Needed so two people who share a first
-    // name can each get their own unique account/vote identity.
+    // Self-healing: group every record by its CORRECT name+lastName key.
+    // Handles two cases in one pass:
+    //  1. A record still sitting under an old, no-longer-correct key (from
+    //     before last name was part of the key) — just gets moved.
+    //  2. Genuine duplicates — two records that both belong to the same
+    //     identity (this can happen if someone registered from a stale
+    //     cached tab right as an update went live) — these get MERGED into
+    //     one record instead of silently leaving a duplicate row forever.
     var keys = Object.keys(usersObj);
+    var groups = {};
     for (var i = 0; i < keys.length; i++){
-      var oldKey = keys[i];
-      var rec = usersObj[oldKey];
+      var k = keys[i];
+      var rec = usersObj[k];
       if (!rec || !rec.username) continue;
       var correctKey = nameKey(rec.username, rec.lastName);
-      if (correctKey !== oldKey && !usersObj[correctKey]){
-        usersObj[correctKey] = rec;
-        delete usersObj[oldKey];
-        await window.storage.setPath('users/' + correctKey, rec);
-        await window.storage.deletePath('users/' + oldKey);
+      groups[correctKey] = groups[correctKey] || [];
+      groups[correctKey].push({ origKey: k, rec: rec });
+    }
+
+    var groupKeys = Object.keys(groups);
+    for (var g = 0; g < groupKeys.length; g++){
+      var gKey = groupKeys[g];
+      var entries = groups[gKey];
+
+      if (entries.length === 1){
+        var only = entries[0];
+        if (only.origKey !== gKey){
+          usersObj[gKey] = only.rec;
+          delete usersObj[only.origKey];
+          await window.storage.setPath('users/' + gKey, only.rec);
+          await window.storage.deletePath('users/' + only.origKey);
+        }
+        continue;
       }
+
+      // Duplicate records for the same identity — merge into one, keeping
+      // the earliest registration as the base and combining activity data.
+      entries.sort(function(a, b){ return (a.rec.createdAt || 0) - (b.rec.createdAt || 0); });
+      var primary = entries[0].rec;
+      for (var e = 1; e < entries.length; e++){
+        var dup = entries[e].rec;
+        primary.totalTimeMs = (primary.totalTimeMs || 0) + (dup.totalTimeMs || 0);
+        primary.visits = Array.prototype.concat.call([], primary.visits || [], dup.visits || [])
+          .filter(function(v, idx, arr){ return arr.indexOf(v) === idx; });
+        primary.achievements = Array.prototype.concat.call([], primary.achievements || [], dup.achievements || [])
+          .filter(function(v, idx, arr){ return arr.indexOf(v) === idx; });
+        if (dup.role === 'admin') primary.role = 'admin';
+        if (dup.isAdmin) primary.isAdmin = true;
+        if ((dup.lastSeenAt || 0) > (primary.lastSeenAt || 0)) primary.lastSeenAt = dup.lastSeenAt;
+        if ((dup.lastVisitAt || 0) > (primary.lastVisitAt || 0)) primary.lastVisitAt = dup.lastVisitAt;
+      }
+      var minId = Math.min.apply(null, entries.map(function(e){ return e.rec.internalId == null ? Infinity : e.rec.internalId; }));
+      if (isFinite(minId)) primary.internalId = minId;
+
+      for (var e2 = 0; e2 < entries.length; e2++){
+        if (usersObj[entries[e2].origKey] !== undefined) delete usersObj[entries[e2].origKey];
+        await window.storage.deletePath('users/' + entries[e2].origKey);
+      }
+      usersObj[gKey] = primary;
+      await window.storage.setPath('users/' + gKey, primary);
     }
     return usersObj;
   }
@@ -1255,6 +1302,13 @@
   // everywhere it matters, so this is always well-defined.
   function nameKey(username, lastName){
     return (normName(username) + '::' + normName(lastName || '')).toLowerCase();
+  }
+
+  // Full "Ім'я Прізвище" for anywhere a name is shown to other people —
+  // first name alone is ambiguous now that two people can share it.
+  function fullDisplayName(username, lastName){
+    var ln = normName(lastName || '');
+    return ln ? (normName(username) + ' ' + ln) : normName(username);
   }
 
   /* Assigns a permanent internalId (1, 2, 3…) in registration order to any
@@ -1533,6 +1587,14 @@
         'Виправлено рідкісний, але серйозний баг: акаунти могли зникати через тимчасовий збій зʼєднання під час реєстрації нового користувача.',
         'Тепер двоє людей з однаковим імʼям (наприклад, два Дмитра) можуть зареєструватися — унікальність визначається за імʼям і прізвищем разом.',
         'Додано резервну перевірку зʼєднання з базою даних перед будь-яким важливим записом.'
+      ]
+    },
+    {
+      version: '1.7',
+      changes: [
+        'Виправлено дублікати акаунтів у списку користувачів — тепер вони автоматично й безпечно об\u2019єднуються (без втрати часу на сайті чи ачівок).',
+        'У списку оцінок і в рейтингу тепер показується повне імʼя з прізвищем — щоб не плутати людей з однаковим іменем.',
+        'Адмін може видаляти акаунти користувачів (крім адмінського) прямо з адмін-панелі.'
       ]
     }
   ];
@@ -2620,6 +2682,27 @@
   document.getElementById('cancel-edit-user').addEventListener('click', closeEditUserModal);
   editUserOverlay.addEventListener('click', function(e){ if (e.target === editUserOverlay) closeEditUserModal(); });
 
+  document.getElementById('delete-user-btn').addEventListener('click', async function(){
+    var key = state.editingUserKey;
+    if (!key) return;
+    var record = await window.storage.getPath('users/' + key);
+    if (!record) { closeEditUserModal(); return; }
+
+    if (record.role === 'admin'){
+      alert('Неможливо видалити акаунт адміністратора звідси. Спочатку призначте цю роль іншому акаунту, якщо потрібно.');
+      return;
+    }
+    if (state.currentUser && nameKey(state.currentUser.username, state.currentUser.lastName) === key){
+      alert('Неможливо видалити акаунт, під яким ви зараз залогінені.');
+      return;
+    }
+    if (!confirm('Видалити користувача «' + fullDisplayName(record.username, record.lastName) + '»? Цю дію не можна скасувати.')) return;
+
+    await window.storage.deletePath('users/' + key);
+    closeEditUserModal();
+    renderAdmin();
+  });
+
   document.getElementById('save-edit-user').addEventListener('click', async function(){
     var origKey = state.editingUserKey;
     if (!origKey) return;
@@ -2875,10 +2958,10 @@
     }
     if (e.target.closest('[data-action="order"]') || e.target.closest('[data-action="interesting"]')){
       item.votes = item.votes || {};
-      var mv = item.votes[myKey] || {order:false, interesting:false, rating:0, displayName: state.currentUser.username};
+      var mv = item.votes[myKey] || {order:false, interesting:false, rating:0, displayName: fullDisplayName(state.currentUser.username, state.currentUser.lastName)};
       if (e.target.closest('[data-action="order"]')) mv.order = !mv.order;
       if (e.target.closest('[data-action="interesting"]')) mv.interesting = !mv.interesting;
-      mv.displayName = state.currentUser.username;
+      mv.displayName = fullDisplayName(state.currentUser.username, state.currentUser.lastName);
       mv.updatedAt = Date.now();
       item.votes[myKey] = mv;
       render();
@@ -2920,7 +3003,7 @@
       item.votes = item.votes || {};
       var mv = item.votes[myKey] || {order:false, interesting:false, rating:0};
       mv.rating = parseInt(e.target.value, 10) || 0;
-      mv.displayName = state.currentUser.username;
+      mv.displayName = fullDisplayName(state.currentUser.username, state.currentUser.lastName);
       mv.updatedAt = Date.now();
       item.votes[myKey] = mv;
       await persistVote(id, myKey);
@@ -3298,7 +3381,7 @@
         itemId: itemId,
         itemName: (state.items[itemId] || {}).name || '',
         userKey: myKey,
-        username: state.currentUser.username,
+        username: fullDisplayName(state.currentUser.username, state.currentUser.lastName),
         text: qText,
         isPublic: isPublic,
         answer: null,
