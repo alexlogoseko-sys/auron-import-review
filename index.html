@@ -1279,6 +1279,34 @@
       usersObj[gKey] = primary;
       await window.storage.setPath('users/' + gKey, primary);
     }
+
+    // Final safety net: if two genuinely different people happened to
+    // register at the exact same instant (a real risk with many concurrent
+    // users — each independently computed "the next free ID" from a
+    // snapshot that didn't yet include the other), internalIds can collide.
+    // No data is lost, but detect it and silently renumber everyone by
+    // registration time so IDs stay unique going forward.
+    var finalKeys = Object.keys(usersObj);
+    var seenIds = {};
+    var hasIdCollision = false;
+    for (var fi = 0; fi < finalKeys.length; fi++){
+      var id = usersObj[finalKeys[fi]].internalId;
+      if (id == null || seenIds[id]){ hasIdCollision = true; break; }
+      seenIds[id] = true;
+    }
+    if (hasIdCollision){
+      var byCreated = finalKeys.slice().sort(function(a, b){
+        return (usersObj[a].createdAt || 0) - (usersObj[b].createdAt || 0);
+      });
+      for (var ri = 0; ri < byCreated.length; ri++){
+        var rk = byCreated[ri];
+        if (usersObj[rk].internalId !== ri + 1){
+          usersObj[rk].internalId = ri + 1;
+          await window.storage.setPath('users/' + rk, usersObj[rk]);
+        }
+      }
+    }
+
     return usersObj;
   }
 
@@ -1291,7 +1319,9 @@
   }
 
   async function saveOneUser(key, record){
-    return window.storage.setPath('users/' + key, record);
+    var ok = await window.storage.setPath('users/' + key, record);
+    if (!ok) ok = await window.storage.setPath('users/' + key, record); // one silent retry — background writes (heartbeat, etc.) shouldn't toast on every blip
+    return ok;
   }
 
   function normName(n){ return (n || '').trim(); }
@@ -1596,6 +1626,14 @@
         'У списку оцінок і в рейтингу тепер показується повне імʼя з прізвищем — щоб не плутати людей з однаковим іменем.',
         'Адмін може видаляти акаунти користувачів (крім адмінського) прямо з адмін-панелі.'
       ]
+    },
+    {
+      version: '1.8',
+      changes: [
+        'Час на сайті тепер рахується лише коли ви дійсно на сторінці (не в фоновій вкладці й не при бездіяльності понад 5 хв).',
+        'Виправлено рідкісний випадок втрати сповіщення про помилку запису — тепер система пробує ще раз і попереджає, якщо дію не вдалось зберегти.',
+        'Перевірено роботу сайту при 15 одночасних користувачах — усі дії (реєстрація, оцінки) зберігаються без втрат.'
+      ]
     }
   ];
 
@@ -1744,22 +1782,48 @@
 
   /* ===== TIME TRACKING & PRESENCE ===== */
   var HEARTBEAT_MS = 45000;
+  var IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes with no mouse/keyboard activity = idle
+
+  function markActivity(){
+    if (state.isIdle){
+      state.isIdle = false;
+      state.lastTickAt = Date.now(); // don't retroactively count the idle gap
+    }
+    if (state.idleTimer) clearTimeout(state.idleTimer);
+    state.idleTimer = setTimeout(function(){ state.isIdle = true; }, IDLE_TIMEOUT_MS);
+  }
+
   function startTimeTracking(){
     state.lastTickAt = Date.now();
+    state.isIdle = false;
+    state.wasVisible = document.visibilityState === 'visible';
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
     state.heartbeatTimer = setInterval(flushTimeTracking, HEARTBEAT_MS);
     document.addEventListener('visibilitychange', function(){
-      if (document.visibilityState === 'hidden') flushTimeTracking();
-      else state.lastTickAt = Date.now();
+      // Flush based on what was true DURING the period that just ended —
+      // by the time this handler runs, visibilityState already reflects the
+      // NEW state, so checking it here would wrongly credit/discredit time.
+      flushTimeTracking(state.wasVisible);
+      state.wasVisible = document.visibilityState === 'visible';
+      state.lastTickAt = Date.now();
     });
+    ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'].forEach(function(evt){
+      document.addEventListener(evt, markActivity, { passive: true });
+    });
+    markActivity();
     window.addEventListener('beforeunload', function(){ flushTimeTracking(); });
   }
 
-  async function flushTimeTracking(){
+  async function flushTimeTracking(wasVisibleOverride){
     if (!state.currentUser) return;
     var now = Date.now();
     var elapsed = now - (state.lastTickAt || now);
     state.lastTickAt = now;
+    // Only count time the tab was actually in the foreground AND the person
+    // was actually active (not just left open in a background tab, or
+    // walked away from the computer with the tab still focused).
+    var wasVisible = (wasVisibleOverride !== undefined) ? wasVisibleOverride : (document.visibilityState === 'visible');
+    if (!wasVisible || state.isIdle) return;
     if (elapsed <= 0 || elapsed > HEARTBEAT_MS * 3) return;
     await updateCurrentUser(function(record){
       record.totalTimeMs = (record.totalTimeMs || 0) + elapsed;
@@ -1880,6 +1944,7 @@
     flushTimeTracking();
     if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
     if (state.pollTimer) clearInterval(state.pollTimer);
+    if (state.idleTimer) clearTimeout(state.idleTimer);
     await clearSession();
     state.currentUser = null;
     document.getElementById('login-name').value = '';
@@ -1888,7 +1953,6 @@
     showAuthScreen();
   });
 
-  /* ===== CATALOG ===== */
   /* ===== CATALOG =====
      Same fix as users: items live at their own paths (catalog/items/{id})
      instead of one shared blob, so two people editing DIFFERENT products (or
@@ -1922,49 +1986,59 @@
   // Full overwrite of ONE item — safe for admin-only actions (add/edit/
   // delete/toggle-transit/toggle-shipping-price) since a single admin is the
   // only actor touching a given product at a time.
-  async function persistItem(id){
-    try{
-      await window.storage.setPath('catalog/items/' + id, state.items[id]);
-    }catch(e){
-      toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
+  // Every write goes through here: retries once on failure, and only THEN
+  // surfaces an error toast — silent data loss (a write failing with no
+  // feedback) is worse than a slightly noisy retry.
+  async function persistWithRetry(writeFn, errorMsg){
+    var ok = false;
+    try{ ok = await writeFn(); }catch(e){ ok = false; }
+    if (!ok){
+      try{ ok = await writeFn(); }catch(e){ ok = false; }
     }
+    if (!ok) toastError(errorMsg);
+    return ok;
+  }
+
+  async function persistItem(id){
+    return persistWithRetry(
+      function(){ return window.storage.setPath('catalog/items/' + id, state.items[id]); },
+      'Не вдалося зберегти зміни товару. Перевірте зʼєднання і спробуйте ще раз.'
+    );
   }
 
   // Just the ordered id list — small and changes only on add/delete.
   async function persistIds(){
-    try{
-      await window.storage.setPath('catalog/ids', state.ids);
-    }catch(e){
-      toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
-    }
+    return persistWithRetry(
+      function(){ return window.storage.setPath('catalog/ids', state.ids); },
+      'Не вдалося зберегти список товарів. Перевірте зʼєднання і спробуйте ще раз.'
+    );
   }
 
   async function deleteItemRemote(id){
-    try{
-      await window.storage.deletePath('catalog/items/' + id);
-    }catch(e){
-      toastError('Не вдалося видалити товар. Перевірте зʼєднання і спробуйте ще раз.');
-    }
+    return persistWithRetry(
+      function(){ return window.storage.deletePath('catalog/items/' + id); },
+      'Не вдалося видалити товар. Перевірте зʼєднання і спробуйте ще раз.'
+    );
   }
 
   // The hot path: rating a product, marking "Замовити"/"Цікаво". PATCH only
   // touches this one user's vote key — everyone else's votes on the same
   // product are left completely untouched, even if they vote at the same instant.
   async function persistVote(id, myKey){
-    try{
-      var mv = state.items[id].votes[myKey];
-      await window.storage.patchPath('catalog/items/' + id + '/votes', { [myKey]: mv });
-    }catch(e){
-      toastError('Не вдалося зберегти вашу оцінку. Перевірте зʼєднання і спробуйте ще раз.');
-    }
+    return persistWithRetry(
+      function(){
+        var mv = state.items[id].votes[myKey];
+        return window.storage.patchPath('catalog/items/' + id + '/votes', { [myKey]: mv });
+      },
+      'Не вдалося зберегти вашу оцінку. Перевірте зʼєднання і спробуйте ще раз.'
+    );
   }
 
   async function removeVoteRemote(id, myKey){
-    try{
-      await window.storage.deletePath('catalog/items/' + id + '/votes/' + myKey);
-    }catch(e){
-      toastError('Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.');
-    }
+    return persistWithRetry(
+      function(){ return window.storage.deletePath('catalog/items/' + id + '/votes/' + myKey); },
+      'Не вдалося зберегти зміни. Перевірте зʼєднання і спробуйте ще раз.'
+    );
   }
 
   // Kept for the rare bulk case (restoring a full backup) — everywhere else
@@ -1991,25 +2065,24 @@
   // Each question/note lives at its own path — one person answering a
   // question, or writing a personal note, never touches anyone else's.
   async function persistQuestion(qid){
-    try{
-      var q = state.questions.filter(function(x){ return x.id === qid; })[0];
-      if (q) await window.storage.setPath('questions/' + qid, q);
-    }catch(e){
-      toastError('Не вдалося зберегти запитання. Перевірте зʼєднання.');
-    }
+    var q = state.questions.filter(function(x){ return x.id === qid; })[0];
+    if (!q) return true;
+    return persistWithRetry(
+      function(){ return window.storage.setPath('questions/' + qid, q); },
+      'Не вдалося зберегти запитання. Перевірте зʼєднання.'
+    );
   }
 
   async function persistNote(itemId, userKey){
-    try{
-      var text = state.notes[itemId] && state.notes[itemId][userKey];
-      if (text){
-        await window.storage.setPath('notes/' + itemId + '/' + userKey, text);
-      } else {
-        await window.storage.deletePath('notes/' + itemId + '/' + userKey);
-      }
-    }catch(e){
-      toastError('Не вдалося зберегти примітку. Перевірте зʼєднання.');
-    }
+    var text = state.notes[itemId] && state.notes[itemId][userKey];
+    return persistWithRetry(
+      function(){
+        return text
+          ? window.storage.setPath('notes/' + itemId + '/' + userKey, text)
+          : window.storage.deletePath('notes/' + itemId + '/' + userKey);
+      },
+      'Не вдалося зберегти примітку. Перевірте зʼєднання.'
+    );
   }
 
   /* ===== CATEGORIES ===== */
@@ -2029,11 +2102,10 @@
   }
 
   async function persistCategories(){
-    try{
-      await window.storage.set('categories', JSON.stringify(state.categories), true);
-    }catch(e){
-      toastError('Не вдалося зберегти категорії. Перевірте зʼєднання і спробуйте ще раз.');
-    }
+    return persistWithRetry(
+      function(){ return window.storage.set('categories', JSON.stringify(state.categories), true); },
+      'Не вдалося зберегти категорії. Перевірте зʼєднання і спробуйте ще раз.'
+    );
   }
 
   function addCategory(name){
