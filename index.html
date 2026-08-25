@@ -245,6 +245,7 @@
   .toggle-chip svg{flex-shrink:0;}
   .toggle-chip.order-on{background:var(--green-dim);border-color:var(--green);color:var(--green);}
   .toggle-chip.interesting-on{background:var(--amber-dim);border-color:var(--amber);color:var(--amber);}
+  .toggle-chip.testing-on{background:rgba(96,165,250,0.16);border-color:#60A5FA;color:#60A5FA;}
   .toggle-chip:disabled{cursor:not-allowed;opacity:0.5;}
 
   .rating-row{display:flex;align-items:center;gap:10px;}
@@ -651,6 +652,7 @@
     <button class="view-tab active" data-view="novelty">Новинки</button>
     <button class="view-tab" data-view="analogs">Аналоги</button>
     <button class="view-tab" data-view="transit">В дорозі <span class="count" id="transit-count">0</span></button>
+    <button class="view-tab hidden" id="testing-tab-btn" data-view="testing">Протестувати</button>
     <button class="view-tab" data-view="leaderboard">Рейтинг</button>
     <button class="view-tab" data-view="profile">Мій прогрес</button>
     <button class="view-tab hidden" id="admin-tab-btn" data-view="admin">Адмінка <span class="count" id="questions-count">0</span></button>
@@ -1634,6 +1636,14 @@
         'Виправлено рідкісний випадок втрати сповіщення про помилку запису — тепер система пробує ще раз і попереджає, якщо дію не вдалось зберегти.',
         'Перевірено роботу сайту при 15 одночасних користувачах — усі дії (реєстрація, оцінки) зберігаються без втрат.'
       ]
+    },
+    {
+      version: '1.9',
+      changes: [
+        'Виправлено безпеку: якщо адмін видаляє користувача, доступ блокується миттєво навіть у вже відкритій вкладці цього користувача.',
+        'Виправлено баг: сповіщення про нові відповіді/питання не оновлювались у фоні через технічну помилку.',
+        'Нова кнопка «Протестувати» біля «Замовити»/«Цікаво» (для адміна й керівників) — переносить товар в окрему вкладку «Протестувати», щоб замовити пробний зразок перед великою партією.'
+      ]
     }
   ];
 
@@ -1853,6 +1863,7 @@
     document.getElementById('open-add-modal').classList.toggle('hidden', !u.isAdmin);
     document.getElementById('open-categories-modal').classList.toggle('hidden', !u.isAdmin);
     document.getElementById('admin-tab-btn').classList.toggle('hidden', !u.isAdmin);
+    document.getElementById('testing-tab-btn').classList.toggle('hidden', !canSeeCost(u));
   }
 
   function showTermsModalIfNeeded(){
@@ -2294,6 +2305,9 @@
             '<button class="toggle-chip ' + (mv.interesting ? 'interesting-on' : '') + '" data-action="interesting">' +
               '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m12 2 3.1 6.6 7.2.8-5.4 4.9 1.5 7.1L12 17.8 5.6 21.4l1.5-7.1L1.7 9.4l7.2-.8Z"/></svg>' +
               'Цікаво</button>' +
+            (showCost ? '<button class="toggle-chip ' + (item.status === 'testing' ? 'testing-on' : '') + '" data-action="toggle-testing">' +
+              '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 3h6M10 3v5.5L5 18a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9.5V3"/></svg>' +
+              (item.status === 'testing' ? 'Повернути до огляду' : 'Протестувати') + '</button>' : '') +
           '</div>' +
           '<div class="rating-row">' +
             '<input type="range" min="0" max="10" step="1" value="' + (mv.rating || 0) + '" data-action="rating">' +
@@ -2322,9 +2336,12 @@
   }
 
   /* Which of the 3 folders an item belongs to. "В дорозі" takes priority —
-     an item marked "в дорозі" stays there even if also flagged as analog. */
+     an item marked "в дорозі" stays there even if also flagged as analog.
+     "Протестувати" sits between review and a shipping decision — a lead/admin
+     orders a sample from China to try before committing to a full batch. */
   function itemFolder(item){
     if (item.status === 'transit') return 'transit';
+    if (item.status === 'testing') return 'testing';
     return item.isAnalog ? 'analogs' : 'novelty';
   }
 
@@ -2408,7 +2425,7 @@
     if (!state.loaded) return;
     updateStats();
 
-    var isCatalogView = (state.view === 'novelty' || state.view === 'analogs' || state.view === 'transit');
+    var isCatalogView = (state.view === 'novelty' || state.view === 'analogs' || state.view === 'transit' || state.view === 'testing');
     document.getElementById('catalog-toolbar').classList.toggle('hidden', !isCatalogView);
     grid.classList.toggle('hidden', !isCatalogView);
     document.getElementById('other-view-container').classList.toggle('hidden', isCatalogView);
@@ -2444,6 +2461,7 @@
       var emptyMsg;
       if (state.view === 'transit') emptyMsg = 'Жоден товар зараз не позначений як «в дорозі».';
       else if (state.view === 'analogs') emptyMsg = 'Жоден товар ще не позначений як «Аналог».';
+      else if (state.view === 'testing') emptyMsg = 'Жоден товар зараз не на тестуванні.';
       else emptyMsg = 'Спробуйте змінити пошук або фільтр.';
       grid.innerHTML = '<div class="empty"><h3 class="h-display">Нічого не знайдено</h3><p>' + emptyMsg + '</p></div>';
       return;
@@ -3010,6 +3028,13 @@
       await persistItem(id);
       return;
     }
+    if (e.target.closest('[data-action="toggle-testing"]')){
+      if (!canSeeCost(state.currentUser)) return;
+      item.status = (item.status === 'testing') ? 'review' : 'testing';
+      render();
+      await persistItem(id);
+      return;
+    }
     if (e.target.closest('[data-action="toggle-shipping-price"]')){
       if (!isAdmin) return;
       item.priceIncludesShipping = !item.priceIncludesShipping;
@@ -3178,6 +3203,7 @@
     var tab = e.target.closest('.view-tab');
     if (!tab) return;
     if (tab.dataset.view === 'admin' && !(state.currentUser && state.currentUser.isAdmin)) return;
+    if (tab.dataset.view === 'testing' && !canSeeCost(state.currentUser)) return;
     document.querySelectorAll('#view-tabs .view-tab').forEach(function(t){ t.classList.remove('active'); });
     tab.classList.add('active');
     state.view = tab.dataset.view;
@@ -3534,19 +3560,33 @@
     await updateCurrentUser(function(record){ record.lastSeenQuestionAt = Date.now(); });
   }
 
-  /* Poll the shared 'questions' collection periodically so answers/new
-     questions show up without needing to log out and back in. There's no
+  /* Poll periodically so answers/new questions show up without needing to
+     log out and back in, AND so a session whose account gets deleted (or
+     demoted) while the tab stays open gets caught quickly instead of
+     silently keeping full access until the next manual reload. There's no
      real push/websocket backend here (static site), so polling is the
-     practical way to approximate near-real-time notifications. */
+     practical way to approximate both. */
   var POLL_MS = 15000;
   function startPolling(){
     if (state.pollTimer) clearInterval(state.pollTimer);
     state.pollTimer = setInterval(async function(){
       if (!state.currentUser) return;
-      var raw = await safeGet('questions', true);
-      var fresh;
-      try{ fresh = raw ? JSON.parse(raw) : []; }catch(e){ fresh = state.questions; }
-      state.questions = fresh;
+
+      var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
+      var stillExists = await window.storage.getPath('users/' + myKey);
+      if (!stillExists){
+        if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
+        if (state.pollTimer) clearInterval(state.pollTimer);
+        if (state.idleTimer) clearTimeout(state.idleTimer);
+        await clearSession();
+        state.currentUser = null;
+        showAuthScreen();
+        toastError('Ваш акаунт було видалено адміністратором. Увійдіть повторно, якщо це помилка.');
+        return;
+      }
+
+      var qData = await window.storage.getPath('questions');
+      state.questions = (qData && typeof qData === 'object') ? Object.keys(qData).map(function(k){ return qData[k]; }) : [];
       await checkAnsweredQuestions();
       await checkNewQuestionsForAdmin();
       refreshNoteBadges();
