@@ -1888,6 +1888,7 @@
   async function afterTermsAccepted(){
     startTimeTracking();
     await recordVisit();
+    await runOneTimeCleanupIfNeeded();
     await checkAnsweredQuestions();
     await checkNewQuestionsForAdmin();
     await checkChangelog();
@@ -2685,13 +2686,6 @@
       '</div>' +
 
       '<div class="admin-section">' +
-        '<h3 class="h-display" style="font-size:17px;margin-bottom:10px;color:var(--red)">Скидання даних (незворотно)</h3>' +
-        '<p class="sub" style="margin-bottom:12px">Видаляє всі акаунти користувачів, окрім вашого, і скидає всі оцінки/голоси на кожному товарі. Товари, категорії, питання та примітки НЕ видаляються. Усі, крім вас, будуть змушені зареєструватися заново.</p>' +
-        '<button class="btn btn-ghost" id="reset-data-btn" style="border-color:var(--red);color:var(--red)">Скинути користувачів та оцінки</button>' +
-        '<div id="reset-data-status" class="sub" style="margin-top:8px;font-size:12px"></div>' +
-      '</div>' +
-
-      '<div class="admin-section">' +
         '<h3 class="h-display" style="font-size:17px;margin-bottom:10px">Резервна копія даних</h3>' +
         '<p class="sub" style="margin-bottom:12px">Завантажте повний знімок усіх даних сайту (товари, категорії, користувачі, питання, примітки) у файл .json. Цей файл можна зберегти на комп\u2019ютері або перенести на інший хостинг/базу.</p>' +
         '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
@@ -2720,8 +2714,6 @@
     if (exportBtn) exportBtn.addEventListener('click', exportBackup);
     var importInput = document.getElementById('import-backup-file');
     if (importInput) importInput.addEventListener('change', importBackup);
-    var resetBtn = document.getElementById('reset-data-btn');
-    if (resetBtn) resetBtn.addEventListener('click', resetUsersAndVotes);
 
     document.querySelectorAll('.role-select').forEach(function(sel){
       sel.addEventListener('change', async function(e){
@@ -2862,48 +2854,40 @@
   /* ===== BACKUP / RESTORE (admin only) =====
      Downloads/reads every shared key so the whole dataset can be moved to a
      different backend or hosting provider if needed. */
-  /* ===== RESET USERS & VOTES (admin only, irreversible) =====
-     Deletes every user account except the caller's own, and clears the
-     votes object on every catalog item. Products/categories/questions/notes
-     are left untouched. Recommends taking a backup export first. */
-  async function resetUsersAndVotes(){
-    var statusEl = document.getElementById('reset-data-status');
-    var btn = document.getElementById('reset-data-btn');
+  /* ===== ONE-TIME AUTO CLEANUP (no button, no repeat) =====
+     Runs itself automatically the very next time the admin logs in — wipes
+     every other account, clears votes/ratings on every product, and clears
+     all questions/notes, so the team can start using the site fresh. Guarded
+     by a persisted flag in Firebase so it can only ever fire once, ever —
+     it will NOT repeat on future logins once real users start registering. */
+  async function runOneTimeCleanupIfNeeded(){
     if (!state.currentUser || !state.currentUser.isAdmin) return;
+    var alreadyDone = await window.storage.getPath('cleanupV1Done');
+    if (alreadyDone) return;
 
-    var confirm1 = confirm(
-      'Це видалить УСІХ користувачів, крім вас, і скине всі оцінки/голоси на кожному товарі. ' +
-      'Товари й категорії залишаться. Дію неможливо скасувати.\n\n' +
-      'Рекомендується спочатку натиснути «Завантажити резервну копію» вище. Продовжити?'
-    );
-    if (!confirm1) return;
-    var confirm2 = confirm('Ви ТОЧНО впевнені? Це останнє підтвердження.');
-    if (!confirm2) return;
-
-    btn.disabled = true;
-    statusEl.textContent = 'Видаляємо користувачів…';
-
-    var users = await getUsers();
     var myKey = nameKey(state.currentUser.username, state.currentUser.lastName);
+    var users = await getUsers();
     var otherKeys = Object.keys(users).filter(function(k){ return k !== myKey; });
     for (var i = 0; i < otherKeys.length; i++){
-      statusEl.textContent = 'Видаляємо користувачів… ' + (i + 1) + ' з ' + otherKeys.length;
       await window.storage.deletePath('users/' + otherKeys[i]);
     }
 
-    statusEl.textContent = 'Скидаємо оцінки на товарах…';
     for (var j = 0; j < state.ids.length; j++){
       var id = state.ids[j];
-      if (state.items[id]){
+      if (state.items[id] && state.items[id].votes && Object.keys(state.items[id].votes).length){
         state.items[id].votes = {};
         await window.storage.deletePath('catalog/items/' + id + '/votes');
       }
     }
 
-    statusEl.textContent = 'Готово. Оновіть сторінку.';
-    statusEl.style.color = 'var(--green)';
-    btn.disabled = false;
+    await window.storage.deletePath('questions');
+    await window.storage.deletePath('notes');
+    state.questions = [];
+    state.notes = {};
+
+    await window.storage.setPath('cleanupV1Done', true);
     render();
+    toastError('Сайт очищено: залишився лише ваш акаунт, старі оцінки й питання видалено. Можна користуватись.');
   }
 
   async function exportBackup(){
